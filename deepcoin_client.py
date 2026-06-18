@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ETH 万亿战神 AI 量化交易引擎 - 深币 (Deepcoin) 核心通信客户端
-架构基底: V7.4 最终避雷版 (针对 Ubuntu 24.04 OpenSSL 策略加固)
+架构基底: V7.6 生产环境最终协议版 (已完全对齐 DC- 协议规范)
 """
 
 import os
@@ -26,41 +26,35 @@ class DeepcoinClient:
         self.base_url = "https://api.deepcoin.com"
 
         if not self.api_key or not self.secret_key or not self.passphrase:
-            logger.error("🚨 缺少深币 API 密钥！")
+            logger.error("🚨 密钥配置不全，请检查 .env")
 
     def _get_timestamp(self):
         return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 
     def _sign(self, timestamp: str, method: str, request_path: str, body: str = ""):
-        """【避雷版】使用标准 hashlib 绕过系统 OpenSSL 策略限制"""
+        """避雷版签名：绕过系统 OpenSSL 策略限制"""
         message = (str(timestamp) + str(method.upper()) + str(request_path) + str(body)).encode('utf-8')
-        # 强制指定 hashlib.sha256() 实例，避免调用受限的系统信封路由[cite: 1]
         h = hmac.new(self.secret_key.encode('utf-8'), message, hashlib.sha256)
         return base64.b64encode(h.digest()).decode('utf-8')
 
     def _request(self, method: str, endpoint: str, params: dict = None):
+        # 确保路径规范：/deepcoin/ 开头
         if not endpoint.startswith("/deepcoin/"):
             endpoint = "/deepcoin" + (endpoint if endpoint.startswith("/") else "/" + endpoint)
             
         timestamp = self._get_timestamp()
-        body_str = ""
-        request_path = endpoint
-
-        if method.upper() == "GET":
-            if params:
-                query_string = "&".join([f"{k}={v}" for k, v in params.items()])
-                request_path = f"{endpoint}?{query_string}"
-        else:
-            if params:
-                body_str = json.dumps(params, separators=(',', ':'))
+        body_str = json.dumps(params, separators=(',', ':')) if params and method.upper() != "GET" else ""
+        request_path = f"{endpoint}?{'&'.join([f'{k}={v}' for k, v in params.items()])}" if method.upper() == "GET" and params else endpoint
 
         signature = self._sign(timestamp, method, request_path, body_str)
+        
+        # 【核心修正】：深币强制要求 DC- 前缀的 Header 协议
         headers = {
             "Content-Type": "application/json",
-            "Deepcoin-Access-Key": self.api_key,
-            "Deepcoin-Access-Sign": signature,
-            "Deepcoin-Access-Timestamp": timestamp,
-            "Deepcoin-Access-Passphrase": self.passphrase
+            "DC-ACCESS-KEY": self.api_key,
+            "DC-ACCESS-SIGN": signature,
+            "DC-ACCESS-TIMESTAMP": timestamp,
+            "DC-ACCESS-PASSPHRASE": self.passphrase
         }
 
         try:
@@ -68,24 +62,25 @@ class DeepcoinClient:
             resp = requests.request(method.upper(), url, data=body_str if body_str else None, headers=headers, timeout=10)
             return resp.json()
         except Exception as e:
-            return {"code": "-1", "msg": f"请求失败: {str(e)}"}
+            return {"code": "-1", "msg": f"网关通信失败: {str(e)}"}
 
     def get_available_balance(self, ccy="USDT"):
-        """获取可用余额"""
+        """获取交易账户余额"""
         res = self._request("GET", "/account/balances", {"instType": "SWAP"})
         try:
+            # 兼容深币多层 JSON 结构
             return float(res["data"][0]["availBal"])
         except: return 0.0
 
     def get_current_price(self, symbol="ETH-USDT-SWAP"):
-        """获取实时盘口"""
+        """获取盘口现价"""
         res = self._request("GET", "/market/ticker", {"instId": symbol})
         try:
             return float(res["data"][0]["last"])
         except: return 0.0
 
     def place_limit_order(self, symbol, side, price, amount, is_close=False):
-        """标准下单接口"""
+        """标准限价下单"""
         params = {
             "instId": symbol,
             "tdMode": "cross",
