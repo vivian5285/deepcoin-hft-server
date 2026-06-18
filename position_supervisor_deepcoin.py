@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor_deepcoin.py（Deepcoin V7.0 高频剥头皮微利 + 动态雷达版）
+# position_supervisor_deepcoin.py（Deepcoin V7.0 高频剥头皮微利 + 动态张数核算雷达版）
 import logging
 import time
 import threading
@@ -18,14 +18,14 @@ class DeepcoinProcessor:
         
         self.symbol = "ETH-USDT-SWAP"
         
-        # 👑 经实盘核实：深币 ETH 合约面值为 1张 = 0.1 ETH
+        # 👑 核心参数：深币 ETH 合约面值为 1张 = 0.1 ETH
         self.face_value = 0.1  
         
         # 👑 刷单微利专属配置
         self.target_net_profit = 3.0  # 核心目标：每单硬性要求【净赚】 3.0 USDT
         self.fee_rate = 0.0006        # 深币普通用户 Taker 预估单边手续费率 (0.06%)
         
-        logger.info("🟢 [Deepcoin] 高频刷单微利引擎初始化，动态成本核算已就绪。")
+        logger.info("🟢 [Deepcoin] 高频刷单微利引擎初始化，本金50%自动换算张数与动态成本核算已就绪。")
 
     def process_signal(self, payload: dict):
         action = payload.get("action", "").upper()
@@ -79,6 +79,7 @@ class DeepcoinProcessor:
             logger.warning(f"[Deepcoin] 账户余额不足 ({balance} USDT)，放弃建仓。")
             return False, 0.0, 0.0, 0
             
+        # 👑 严格动用本金 50%，配合 20倍杠杆
         margin = balance * 0.50
         notional_usdt = margin * self.leverage
         
@@ -87,7 +88,7 @@ class DeepcoinProcessor:
             logger.error("[Deepcoin] 无法获取盘口价格，放弃建仓！")
             return False, 0.0, 0.0, 0
 
-        # 【核心换算】：USDT 价值 -> 对应 ETH 数量 -> 换算成深币合约张数
+        # 【核心换算】：USDT 价值 -> 换算成深币合约张数 (面值 0.1)
         total_contracts = int(notional_usdt / (current_price * self.face_value))
         if total_contracts <= 0:
             logger.warning(f"[Deepcoin] 计算所得张数太小 (<1)，放弃建仓。")
@@ -96,7 +97,7 @@ class DeepcoinProcessor:
         escalation_steps = [0.0, 1.5, 3.0]
         wait_time_per_strike = 20
         
-        logger.info(f"🐺 [三段狙击] 启动！目标筹码 {total_contracts} 张 (约 {notional_usdt:.2f} U)，准备分梯次拦截盘口！")
+        logger.info(f"🐺 [三段狙击] 启动！调用资金 {margin:.2f}U, 目标筹码 {total_contracts} 张，准备分梯次拦截盘口！")
 
         final_pos = None
         
@@ -182,7 +183,6 @@ class DeepcoinProcessor:
         self.monitor_thread.start()
 
     def _radar_loop(self, action: str, signal_price: float, entry_price: float):
-        # 1. 初始成本核算基准
         pos_info = self._get_active_position()
         if not pos_info or pos_info['size'] <= 0:
             logger.error("❌ 雷达启动失败：未能获取到实盘仓位张数！")
@@ -192,7 +192,6 @@ class DeepcoinProcessor:
         contracts = pos_info['size']
         current_entry_price = entry_price
         
-        # 内部函数：根据当前张数和最新均价，动态推导一击全平斩仓价
         def calculate_tp_price(current_contracts, avg_price):
             notional_value = avg_price * current_contracts * self.face_value
             estimated_total_fee = notional_value * self.fee_rate * 2 
@@ -220,7 +219,6 @@ class DeepcoinProcessor:
                         self.monitoring = False
                         break
                         
-                    # 兼容人工干预：如果张数或均价变了，立刻重算止盈防线！
                     new_contracts = current_pos_info['size']
                     new_entry_price = current_pos_info['entry_price']
                     
