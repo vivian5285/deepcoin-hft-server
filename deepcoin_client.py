@@ -2,13 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 ETH 万亿战神 AI 量化交易引擎 - 深币 (Deepcoin) 核心通信客户端
-架构基底: V7.2 生产环境终极修复版 (已切换至 /api/ 真实路径)
+架构基底: V7.3 稳定版 (强制使用 api.deepcoin.com + 标准路径)
 """
 
 import os
-import time
 import hmac
-import hashlib
 import base64
 import json
 import logging
@@ -25,8 +23,8 @@ class DeepcoinClient:
         self.secret_key = os.getenv("DEEPCOIN_API_SECRET")
         self.passphrase = os.getenv("DEEPCOIN_PASSPHRASE")
         
-        # 核心修复：确保使用官方推荐的 openapi 地址
-        self.base_url = "https://openapi.deepcoin.com"
+        # 使用最稳定的主域名
+        self.base_url = "https://api.deepcoin.com"
 
         if not self.api_key or not self.secret_key or not self.passphrase:
             logger.error("🚨 缺少深币 API 密钥！")
@@ -36,13 +34,13 @@ class DeepcoinClient:
 
     def _sign(self, timestamp: str, method: str, request_path: str, body: str = ""):
         message = str(timestamp) + str(method.upper()) + str(request_path) + str(body)
-        mac = hmac.new(bytes(self.secret_key, encoding='utf8'), bytes(message, encoding='utf-8'), digestmod='sha256')
+        mac = hmac.new(bytes(self.secret_key, encoding='utf8'), bytes(message, encoding='utf-8'), digestmod='hashlib.sha256')
         return base64.b64encode(mac.digest()).decode('utf-8')
 
     def _request(self, method: str, endpoint: str, params: dict = None):
-        # 核心路径修复：所有 endpoint 统一指向 /api/ 开头的最新接口 [cite: 12]
-        if not endpoint.startswith("/api/"):
-            endpoint = endpoint.replace("/deepcoin/", "/api/")
+        # 确保路径以 /deepcoin/ 开头，这是深币 API 的统一规范
+        if not endpoint.startswith("/deepcoin/"):
+            endpoint = "/deepcoin" + (endpoint if endpoint.startswith("/") else "/" + endpoint)
             
         timestamp = self._get_timestamp()
         body_str = ""
@@ -70,39 +68,36 @@ class DeepcoinClient:
             resp = requests.request(method.upper(), url, data=body_str if body_str else None, headers=headers, timeout=10)
             return resp.json()
         except Exception as e:
-            return {"code": "-1", "msg": f"网络通信故障: {str(e)}"}
+            return {"code": "-1", "msg": f"请求失败: {str(e)}"}
 
     def get_available_balance(self, ccy="USDT"):
-        """获取可用余额 [cite: 12]"""
-        res = self._request("GET", "/api/account/balances", {"ccy": ccy})
+        """使用 /deepcoin/account/balances 接口查询资产"""
+        res = self._request("GET", "/account/balances", {"instType": "SWAP"})
         try:
-            # 根据最新透视数据解析，直接取 data 下的字段 [cite: 16]
-            data = res.get("data", [])
-            return float(data[0].get("availBal", 0)) if data else 0.0
+            # 根据透视到的JSON，直接解析可用余额
+            return float(res["data"][0]["availBal"])
         except: return 0.0
 
     def get_current_price(self, symbol="ETH-USDT-SWAP"):
-        """获取实时盘口 [cite: 16]"""
-        res = self._request("GET", "/api/market/ticker", {"instId": symbol})
+        """使用 /deepcoin/market/ticker 接口查询现价"""
+        res = self._request("GET", "/market/ticker", {"instId": symbol})
         try:
-            data = res.get("data", [])
-            return float(data[0].get("last", 0)) if data else 0.0
+            return float(res["data"][0]["last"])
         except: return 0.0
 
     def place_limit_order(self, symbol, side, price, amount, is_close=False):
-        """标准下单接口 """
-        ord_side = "buy" if side.upper() == "LONG" else "sell"
+        """标准下单接口，路径规范：/deepcoin/trade/order"""
         params = {
             "instId": symbol,
             "tdMode": "cross",
-            "side": ord_side,
+            "side": "buy" if side.upper() == "LONG" else "sell",
             "ordType": "limit",
             "sz": str(int(amount)),
             "px": str(round(price, 2)),
             "posSide": "long" if side.upper() == "LONG" else "short",
             "mrgPosition": "merge"
         }
-        if is_close: params["reduceOnly"] = "true"
-        return self._request("POST", "/api/trade/order", params)
+        if is_close: params["reduceOnly"] = True
+        return self._request("POST", "/trade/order", params)
 
 deepcoin_client = DeepcoinClient()
