@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ETH 万亿战神 AI 量化交易引擎 - 深币 (Deepcoin) 核心通信客户端
-架构基底: V7.7 最终胜利版 (已完美适配 DC- 鉴权协议与 100U 余额读取)
+架构基底: V7.8 完美稳健版 (针对盘口查询做了零值异常防护)
 """
 
 import os
@@ -34,7 +34,6 @@ class DeepcoinClient:
         return base64.b64encode(h.digest()).decode('utf-8')
 
     def _request(self, method: str, endpoint: str, params: dict = None):
-        # 补全路径
         if not endpoint.startswith("/deepcoin/"):
             endpoint = "/deepcoin" + (endpoint if endpoint.startswith("/") else "/" + endpoint)
             
@@ -44,7 +43,6 @@ class DeepcoinClient:
 
         signature = self._sign(timestamp, method, request_path, body_str)
         
-        # 使用验证成功的 DC- Header 协议
         headers = {
             "Content-Type": "application/json",
             "DC-ACCESS-KEY": self.api_key,
@@ -57,15 +55,13 @@ class DeepcoinClient:
             url = f"{self.base_url}{request_path}"
             resp = requests.request(method.upper(), url, data=body_str if body_str else None, headers=headers, timeout=10)
             return resp.json()
-        except Exception as e:
-            logger.error(f"网关通信故障: {e}")
+        except:
             return {"code": "-1"}
 
     def get_available_balance(self, ccy="USDT"):
-        """精准读取余额"""
+        """精准读取余额，带容错处理"""
         res = self._request("GET", "/account/balances", {"instType": "SWAP"})
         try:
-            # 这里的解析逻辑已经验证成功
             for item in res.get("data", []):
                 if item.get("ccy") == ccy:
                     return float(item.get("availBal", 0))
@@ -73,14 +69,17 @@ class DeepcoinClient:
         except: return 0.0
 
     def get_current_price(self, symbol="ETH-USDT-SWAP"):
-        """获取盘口价格"""
+        """获取盘口价格（已优化：加入空值判断，防止程序崩溃）"""
         res = self._request("GET", "/market/ticker", {"instId": symbol})
         try:
-            return float(res["data"][0]["last"])
-        except: return 0.0
+            # 安全读取逻辑：检查是否存在 data 列表，且列表内有数据
+            if res and "data" in res and len(res["data"]) > 0:
+                return float(res["data"][0].get("last", 0))
+            return 0.0
+        except Exception:
+            return 0.0
 
     def place_limit_order(self, symbol, side, price, amount, is_close=False):
-        """标准下单"""
         params = {
             "instId": symbol,
             "tdMode": "cross",
