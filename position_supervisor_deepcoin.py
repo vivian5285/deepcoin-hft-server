@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# position_supervisor_deepcoin.py（Deepcoin V7.0 黄金60秒三段狙击 + 锚定止盈版）
+# position_supervisor_deepcoin.py（Deepcoin V7.0 高频剥头皮微利 + 动态雷达版）
 import logging
 import time
 import threading
@@ -16,16 +16,16 @@ class DeepcoinProcessor:
         self.monitor_thread = None
         self._lock = threading.Lock()
         
-        # 👑 深币专属交易对与面值设定
         self.symbol = "ETH-USDT-SWAP"
-        # 【重要】深币 ETH 合约面值 (通常 1张 = 0.01 ETH，需核实)
-        self.face_value = 0.01  
         
-        # 👑 严格锁定：分批止盈目标 (距离 TV 信号锚定点的 U 数)
-        self.tp1_diff = 7.0   # 到达 7U，切除 50%
-        self.tp2_diff = 15.0  # 到达 15U，全平收网
+        # 👑 经实盘核实：深币 ETH 合约面值为 1张 = 0.1 ETH
+        self.face_value = 0.1  
         
-        logger.info("🟢 [Deepcoin] 1h波段极核引擎初始化，三段狙击、锚定防线与实盘看门狗已就绪。")
+        # 👑 刷单微利专属配置
+        self.target_net_profit = 3.0  # 核心目标：每单硬性要求【净赚】 3.0 USDT
+        self.fee_rate = 0.0006        # 深币普通用户 Taker 预估单边手续费率 (0.06%)
+        
+        logger.info("🟢 [Deepcoin] 高频刷单微利引擎初始化，动态成本核算已就绪。")
 
     def process_signal(self, payload: dict):
         action = payload.get("action", "").upper()
@@ -52,7 +52,7 @@ class DeepcoinProcessor:
             success, entry_price, margin, attempts = self._execute_escalating_open(action)
             
             if success:
-                # 真实建仓成功，启动 7U/15U 专属止盈雷达 (传入 signal_price 作为锚点)
+                # 真实建仓成功，启动动态微利雷达
                 self._report_open(action, margin, signal_price, entry_price, attempts)
                 self._start_radar(action, signal_price, entry_price)
             else:
@@ -61,7 +61,6 @@ class DeepcoinProcessor:
     def _close_all(self, reason: str):
         logger.info(f"🧹 开始执行绝对清场: {reason}")
         for attempt in range(3):
-            # 深币官方极速全撤与全平接口
             deepcoin_client.cancel_all_open_orders(symbol=self.symbol)
             time.sleep(0.5)
             deepcoin_client.close_all_positions(symbol=self.symbol)
@@ -74,9 +73,6 @@ class DeepcoinProcessor:
             logger.warning(f"⚠️ 第 {attempt+1} 次清场后仍发现残余仓位，继续清剿！")
         logger.error("🚨 警告：经过 3 轮极致扫荡，阵地仍未彻底清空！")
 
-    # ==========================================
-    # 黄金 60 秒三段递进狙击机制 (转换为深币张数)
-    # ==========================================
     def _execute_escalating_open(self, action: str):
         balance = deepcoin_client.get_available_balance(ccy="USDT")
         if balance < 10:
@@ -109,12 +105,9 @@ class DeepcoinProcessor:
             if curr_px <= 0:
                 time.sleep(1); continue
                 
-            # 计算限价
             target_price = curr_px + slippage if action == "LONG" else curr_px - slippage
-            
             logger.info(f"🔫 第 {strike_idx} 枪测距完毕：挂出限价 {target_price:.2f} (让利 {slippage}U)")
             
-            # 发射限价单
             deepcoin_client.place_limit_order(
                 symbol=self.symbol, 
                 side=action, 
@@ -123,7 +116,6 @@ class DeepcoinProcessor:
                 leverage=self.leverage
             )
             
-            # 扫描盘口等待成交 (容差 10%)
             filled = False
             for _ in range(wait_time_per_strike):
                 time.sleep(1.0)
@@ -156,7 +148,6 @@ class DeepcoinProcessor:
             if target_ratio >= 1.0:
                 deepcoin_client.close_all_positions(symbol=self.symbol)
             else:
-                # 调用深币专属的市价反向对冲切割刀
                 deepcoin_client.close_position_partial(symbol=self.symbol, action=action, close_ratio=target_ratio)
                 
             time.sleep(2.0)
@@ -176,7 +167,7 @@ class DeepcoinProcessor:
             if not data: return None
             
             for pos in data:
-                size = float(pos.get("pos", 0)) # 深币返回的仓位张数字段通常为 pos
+                size = float(pos.get("pos", 0))
                 if size > 0:
                     entry = float(pos.get("avgPx", pos.get("price", 0)))
                     return {"size": size, "entry_price": entry}
@@ -191,48 +182,66 @@ class DeepcoinProcessor:
         self.monitor_thread.start()
 
     def _radar_loop(self, action: str, signal_price: float, entry_price: float):
-        # 👑 核心黑科技：以 TV 信号锚定点计算止盈
-        tp1_price = signal_price + self.tp1_diff if action == "LONG" else signal_price - self.tp1_diff
-        tp2_price = signal_price + self.tp2_diff if action == "LONG" else signal_price - self.tp2_diff
+        # 1. 初始成本核算基准
+        pos_info = self._get_active_position()
+        if not pos_info or pos_info['size'] <= 0:
+            logger.error("❌ 雷达启动失败：未能获取到实盘仓位张数！")
+            self.monitoring = False
+            return
+            
+        contracts = pos_info['size']
+        current_entry_price = entry_price
         
-        tp1_done = False
-        logger.info(f"🎯 [智能锚定雷达] TV信号锚定: {signal_price:.2f} | 实际入场: {entry_price:.2f}")
-        logger.info(f"🎯 锁定 7U/15U 防线: TP1={tp1_price:.2f}, TP2={tp2_price:.2f}")
+        # 内部函数：根据当前张数和最新均价，动态推导一击全平斩仓价
+        def calculate_tp_price(current_contracts, avg_price):
+            notional_value = avg_price * current_contracts * self.face_value
+            estimated_total_fee = notional_value * self.fee_rate * 2 
+            target_gross = self.target_net_profit + estimated_total_fee
+            required_diff = target_gross / (current_contracts * self.face_value)
+            tp = avg_price + required_diff if action == "LONG" else avg_price - required_diff
+            return tp, estimated_total_fee
+
+        tp_price, est_fee = calculate_tp_price(contracts, current_entry_price)
+        
+        logger.info(f"🎯 [微利核算] 实盘建仓: {contracts}张 | 预估双边手续费: {est_fee:.2f}U")
+        logger.info(f"🎯 [一击全平防线] 挂牌均价: {current_entry_price:.2f} | 绝杀收网价: {tp_price:.2f}")
         
         watchdog_counter = 0 
         
         while self.monitoring:
             try:
-                # 🐶 每 5 秒向交易所查一次岗，防人工干预错乱
                 watchdog_counter += 1
                 if watchdog_counter >= 25:
                     watchdog_counter = 0
-                    if not self._get_active_position():
+                    current_pos_info = self._get_active_position()
+                    
+                    if not current_pos_info or current_pos_info['size'] <= 0:
                         logger.info("👀 [雷达巡更] 发现实盘仓位已清零，雷达自动休眠待命！")
                         self.monitoring = False
                         break
+                        
+                    # 兼容人工干预：如果张数或均价变了，立刻重算止盈防线！
+                    new_contracts = current_pos_info['size']
+                    new_entry_price = current_pos_info['entry_price']
+                    
+                    if new_contracts != contracts or new_entry_price != current_entry_price:
+                        logger.warning(f"👀 [雷达巡更] 察觉到人工干预！仓位或均价发生变化，正在重新定位瞄准镜...")
+                        contracts = new_contracts
+                        current_entry_price = new_entry_price
+                        tp_price, est_fee = calculate_tp_price(contracts, current_entry_price)
+                        logger.info(f"🔄 [动态对齐] 已重新核算成本！新手续费: {est_fee:.2f}U | 新收网价: {tp_price:.2f}")
 
                 current_price = deepcoin_client.get_current_price(self.symbol)
                 if current_price <= 0:
                     time.sleep(0.2); continue
                     
-                if not tp1_done:
-                    if (action == "LONG" and current_price >= tp1_price) or \
-                       (action == "SHORT" and current_price <= tp1_price):
-                        logger.info(f"✨ 击穿 7U 信号防线！启动半仓落袋！")
-                        success, attempts = self._execute_pitbull_close(action, 0.5, "TP1")
-                        tp1_done = True
-                        self._report_tp(action, "7U(锚定) 半仓落袋", entry_price, current_price, attempts)
-                        continue
-                        
-                if tp1_done:
-                    if (action == "LONG" and current_price >= tp2_price) or \
-                       (action == "SHORT" and current_price <= tp2_price):
-                        logger.info(f"✨ 击穿 15U 终极目标！启动全平收网！")
-                        success, attempts = self._execute_pitbull_close(action, 1.0, "TP2")
-                        self.monitoring = False
-                        self._report_tp(action, "15U(锚定) 终极全平", entry_price, current_price, attempts)
-                        break
+                if (action == "LONG" and current_price >= tp_price) or \
+                   (action == "SHORT" and current_price <= tp_price):
+                    logger.info(f"✨ 击穿动态微利防线！扣除手续费后净赚目标达成！")
+                    success, attempts = self._execute_pitbull_close(action, 1.0, "TP_FULL")
+                    self.monitoring = False
+                    self._report_tp(action, f"净赚 {self.target_net_profit}U (一击全平)", current_entry_price, current_price, attempts)
+                    break
             except Exception:
                 pass
             time.sleep(0.2)
@@ -247,9 +256,6 @@ class DeepcoinProcessor:
 
     def _report_open(self, action: str, margin: float, signal_price: float, entry_price: float, attempts: int):
         emoji = "🟩" if action == "LONG" else "🟥"
-        tp1 = signal_price + self.tp1_diff if action == "LONG" else signal_price - self.tp1_diff
-        tp2 = signal_price + self.tp2_diff if action == "LONG" else signal_price - self.tp2_diff
-        
         text = f"""
 | 项目 | 详情 |
 | :--- | :--- |
@@ -258,9 +264,7 @@ class DeepcoinProcessor:
 | **实盘均价** | **{entry_price:.2f}** |
 | **打入策略** | 第 **{attempts}** 枪命中目标 |
 
-🎯 **两段式严格止盈边界(信号锚定)**: 
-- **TP1 (平50%)**: `{tp1:.2f}` (+7U)
-- **TP2 (全平)**: `{tp2:.2f}` (+15U)
+🎯 **目标锁定**：正在实时核算手续费，锁定 **净赚 3U** 斩仓线中...
 """
         dingtalk.send_markdown_message("🚀 [Deepcoin] 狙击战役建仓成功", text)
 
