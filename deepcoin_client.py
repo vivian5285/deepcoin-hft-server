@@ -62,7 +62,6 @@ class DeepcoinClient:
         return self._request("GET", "/account/positions", {"instType": "SWAP", "instId": symbol})
 
     def place_market_order(self, symbol, side, amount):
-        """💥 新增：市价单极速抢跑（现价立刻开仓）"""
         params = {
             "instId": symbol, "tdMode": "cross",
             "side": "buy" if side.upper() == "LONG" else "sell",
