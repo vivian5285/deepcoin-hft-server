@@ -11,7 +11,6 @@ logger = logging.getLogger(__name__)
 
 class DeepcoinClient:
     def __init__(self):
-        # 兼容各种环境变量命名
         self.api_key = os.getenv("DEEPCOIN_API_KEY", os.getenv("API_KEY", ""))
         self.secret_key = os.getenv("DEEPCOIN_API_SECRET", os.getenv("DEEPCOIN_SECRET_KEY", os.getenv("SECRET_KEY", "")))
         self.passphrase = os.getenv("DEEPCOIN_PASSPHRASE", os.getenv("PASSPHRASE", os.getenv("API_PASSPHRASE", "")))
@@ -37,13 +36,13 @@ class DeepcoinClient:
             
         timestamp = self._get_timestamp()
         
-        # 👑 V7 核心：GET 请求参数必须拼接在 URL 后面参与签名，POST body 必须转 JSON
+        # 👑 V7 核心：GET 请求参数拼接，POST body 转 JSON
         body_str = json.dumps(params, separators=(',', ':')) if params and method.upper() != "GET" else ""
         request_path = f"{endpoint}?{'&'.join([f'{k}={v}' for k, v in params.items()])}" if method.upper() == "GET" and params else endpoint
         
         signature = self._sign(timestamp, method, request_path, body_str)
         
-        # 👑 V7 核心：全新的 DC-ACCESS 请求头
+        # 👑 V7 核心：DC-ACCESS 请求头
         headers = {
             "Content-Type": "application/json", 
             "DC-ACCESS-KEY": self.api_key,
@@ -64,7 +63,7 @@ class DeepcoinClient:
             return None
 
     def get_available_balance(self, ccy="USDT"):
-        # 👑 V7 核心：接口变更为 /account/balances，字段名为 availBal
+        # 👑 完美读取深币金库
         res = self._request("GET", "/account/balances", {"instType": "SWAP"})
         if isinstance(res, dict) and "data" in res:
             for item in res["data"]:
@@ -73,12 +72,16 @@ class DeepcoinClient:
         return 0.0
 
     def get_current_price(self, symbol="ETH-USDT-SWAP"):
-        # 👑 V7 核心：接口变更为 /market/ticker
-        res = self._request("GET", "/market/ticker", {"instId": symbol})
-        if isinstance(res, dict) and "data" in res and len(res["data"]) > 0:
-            price = res["data"][0].get("last")
-            return float(price) if price else 0.0
-        return 0.0
+        """🚀 白嫖币安公开接口查价，绝对稳定，且两端基准 100% 同步"""
+        try:
+            binance_symbol = symbol.split("-")[0] + "USDT" 
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={binance_symbol}"
+            res = requests.get(url, timeout=5)
+            data = res.json()
+            return float(data.get("price", 0.0))
+        except Exception as e:
+            logger.error(f"借用币安公开接口查价失败: {e}")
+            return 0.0
 
     def get_position_info(self, symbol="ETH-USDT-SWAP"):
         return self._request("GET", "/account/positions", {"instType": "SWAP", "instId": symbol})
@@ -113,7 +116,7 @@ class DeepcoinClient:
 
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
         try:
-            # 👑 融合版：保留我们设计的 0.5 秒双重轰炸防线，使用 V7 最新接口
+            # 👑 双重轰炸撤单防线
             self._request("POST", "/trade/cancel-batch-orders", {"instId": symbol})
             self._request("POST", "/trade/cancel-algo-orders", {"instId": symbol})
             time.sleep(0.5)
