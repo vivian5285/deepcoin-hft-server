@@ -20,15 +20,16 @@ class DeepcoinProcessor:
         self.leverage = 20
         self.face_value = 0.1
         
+        # 👑 战术防线：7/15 止盈，30 绝对价差止损
         self.tp1_diff = 7.0
         self.tp2_diff = 15.0
-        self.sl_diff = 20.0  # ETH盘口绝对价差
+        self.sl_diff = 30.0  # 统一提升至 30 美金抗震价差
         
         self.watched_qty = 0
         self.watched_entry = 0.0
         self.current_side = None
 
-        logger.info("🧠 深币 V9.0 启动：轮询探针、并发锁、5U让步、全域自愈激活！")
+        logger.info("🧠 深币 V9.1 启动：轮询探针、并发锁、5U让步、30美金止损、全域自愈激活！")
 
     def _calculate_even_contracts(self):
         balance = deepcoin_client.get_available_balance()
@@ -115,6 +116,7 @@ class DeepcoinProcessor:
 
                 if actual_side != self.current_side and actual_side in ["LONG", "SHORT"]:
                     self._close_all("强行对齐：抹杀与信号相悖的仓位")
+                    dingtalk.report_force_align(actual_side, self.current_side)
                     break
                 
                 if actual_qty != self.watched_qty or abs(actual_entry - self.watched_entry) > 0.5:
@@ -127,6 +129,7 @@ class DeepcoinProcessor:
                     tp1_px, tp2_px, sl_px = self._calc_tp_sl(actual_entry)
                     close_side = "SHORT" if self.current_side == "LONG" else "LONG"
                     
+                    # 自愈机制：剩余头寸全数挂最高止盈 (15价差)
                     deepcoin_client.place_limit_order(self.symbol, close_side, tp2_px, actual_qty, is_close=True)
                     deepcoin_client.place_conditional_order(self.symbol, close_side, sl_px, actual_qty)
                     dingtalk.report_intervention(actual_qty, actual_entry, tp2_px, sl_px)
