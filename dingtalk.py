@@ -21,7 +21,7 @@ def send_alert(title, data_dict):
         "msgtype": "markdown",
         "markdown": {
             "title": title,
-            "text": f"### {title}\n> **⏱ 战神核对**：{datetime.now().strftime('%m-%d %H:%M:%S')}\n\n{text}\n\n---\n*🤖 ETH 万亿战神 V8.7 复利守护引擎*"
+            "text": f"### {title}\n> **⏱ 战神核对**：{datetime.now().strftime('%m-%d %H:%M:%S')}\n\n{text}\n\n---\n*🤖 深币(Deepcoin) 战神 V8.8 极速防线守护*"
         }
     }
     try:
@@ -31,23 +31,23 @@ def send_alert(title, data_dict):
 
 def report_deepcoin_open(side, price, qty, tp1_px, tp2_px, sl_px):
     emoji = "🟩" if side == "LONG" else "🟥"
-    send_alert("⚔️ 战神已市价抢跑 (偶数动态复利)", {
+    send_alert("⚔️ 深币已市价抢跑 (偶数动态复利)", {
         "防守方向": f"{emoji} {side}",
         "实盘均价": f"`{price:.2f}`",
-        "核算头寸": f"`{qty}` 张 (已拆分对半防线)",
-        "TP1 落袋 (7U)": f"`{tp1_px:.2f}`",
-        "TP2 止盈 (15U)": f"`{tp2_px:.2f}`",
-        "绝对止损 (20U)": f"`{sl_px:.2f}`"
+        "核算头寸": f"`{qty}` 张 (已对半切割)",
+        "TP1 止盈 (7美金价差)": f"`{tp1_px:.2f}`",
+        "TP2 止盈 (15美金价差)": f"`{tp2_px:.2f}`",
+        "全仓止损 (20美金价差)": f"`{sl_px:.2f}`"
     })
 
 def report_intervention(qty, entry_px, new_tp, new_sl):
-    send_alert("⚠️ 察觉仓位异动：哨兵自愈布防", {
-        "触发原因": "检测到人工加减仓，或 TP1 已成功落袋",
+    send_alert("⚠️ 察觉深币仓位异动：哨兵已自愈重装", {
+        "触发原因": "检测到人工干预，或前置止盈已落袋",
         "残余头寸": f"`{qty}` 张",
         "最新均价": f"`{entry_px:.2f}`",
-        "动作": "已撤销所有错乱挂单，挂载专属防卫网",
-        "全仓止盈位": f"`{new_tp:.2f}`",
-        "全仓止损位": f"`{new_sl:.2f}`"
+        "动作": "旧网已全撤，按新均价重新布设专属防线",
+        "统一限价止盈位": f"`{new_tp:.2f}`",
+        "条件止损防线位": f"`{new_sl:.2f}`"
     })
 
 def report_deepcoin_clear(reason):
