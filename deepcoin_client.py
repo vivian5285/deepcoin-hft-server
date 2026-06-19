@@ -50,56 +50,52 @@ class DeepcoinClient:
         except: return 0.0
 
     def get_current_price(self, symbol="ETH-USDT-SWAP"):
+        """🚀 借用币安公有接口获取现价 (免鉴权、极速、防404)"""
         try:
-            res = self._request("GET", "/market/ticker", {"instId": symbol})
-            if isinstance(res, dict) and "data" in res and len(res["data"]) > 0:
-                price = res["data"][0].get("last")
-                return float(price) if price else 0.0
+            res = requests.get("https://fapi.binance.com/fapi/v1/ticker/price?symbol=ETHUSDT", timeout=3)
+            if res.status_code == 200:
+                return float(res.json()["price"])
             return 0.0
-        except: return 0.0
+        except Exception as e:
+            return 0.0
 
     def get_position_info(self, symbol="ETH-USDT-SWAP"):
         return self._request("GET", "/account/positions", {"instType": "SWAP", "instId": symbol})
 
-    def place_market_order(self, symbol, side, amount):
+    def place_market_order(self, symbol, side, pos_side, amount):
         params = {
             "instId": symbol, "tdMode": "cross",
-            "side": "buy" if side.upper() == "LONG" else "sell",
+            "side": side, "posSide": pos_side,
             "ordType": "market", "sz": str(int(amount)),
-            "posSide": "long" if side.upper() == "LONG" else "short",
             "mrgPosition": "merge"
         }
         return self._request("POST", "/trade/order", params)
 
-    def place_limit_order(self, symbol, side, price, amount, is_close=False):
+    def place_limit_order(self, symbol, side, pos_side, price, amount):
         params = {
             "instId": symbol, "tdMode": "cross",
-            "side": "buy" if side.upper() == "LONG" else "sell",
+            "side": side, "posSide": pos_side,
             "ordType": "limit", "sz": str(int(amount)),
-            "px": str(round(price, 2)),
-            "posSide": "long" if side.upper() == "LONG" else "short",
-            "mrgPosition": "merge"
+            "px": str(round(price, 2)), "mrgPosition": "merge"
         }
-        if is_close: params["reduceOnly"] = True
         return self._request("POST", "/trade/order", params)
 
-    def place_conditional_order(self, symbol, side, trigger_price, amount):
-        """🚀 补丁2：深币硬止损优化，给予 5U 穿透让步，誓死保证止损成交"""
-        ord_px = trigger_price - 5.0 if side.upper() == "SELL" else trigger_price + 5.0
+    def place_conditional_order(self, symbol, side, pos_side, trigger_price, amount):
+        """🚀 升级为原生市价条件单止损，誓死保证成交"""
         params = {
-            "instId": symbol, "tdMode": "cross",
-            "side": "buy" if side.upper() == "LONG" else "sell",
-            "ordType": "conditional", "sz": str(int(amount)),
-            "triggerPx": str(round(trigger_price, 2)), 
-            "ordPx": str(round(ord_px, 2)),
-            "posSide": "long" if side.upper() == "LONG" else "short", 
-            "reduceOnly": True
+            "instId": symbol, "productGroup": "Swap",
+            "sz": str(int(amount)), "side": side, "posSide": pos_side,
+            "isCrossMargin": "1", "orderType": "market", 
+            "triggerPrice": str(round(trigger_price, 2)),
+            "mrgPosition": "merge", "tdMode": "cross"
         }
-        return self._request("POST", "/trade/order/algo", params)
+        return self._request("POST", "/trade/trigger-order", params)
 
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
-        self._request("POST", "/trade/cancel-batch-orders", {"instId": symbol})
-        return self._request("POST", "/trade/cancel-algo-orders", {"instId": symbol})
+        inst_id_base = symbol.replace("-SWAP", "").replace("-", "") # 转换成 ETHUSDT
+        p1 = {"InstrumentID": inst_id_base, "ProductGroup": "SwapU", "IsCrossMargin": 1, "IsMergeMode": 1}
+        self._request("POST", "/trade/swap/cancel-all", p1)
+        self._request("POST", "/trade/swap/cancel-trigger-all", p1)
 
     def close_all_positions(self, symbol="ETH-USDT-SWAP"):
         return self._request("POST", "/trade/close-position", {"instId": symbol, "mrgPosition": "merge"})
