@@ -10,15 +10,16 @@ logger = logging.getLogger(__name__)
 
 class DeepcoinClient:
     def __init__(self):
-        self.api_key = os.getenv("DEEPCOIN_API_KEY", os.getenv("API_KEY", ""))
-        self.secret_key = os.getenv("DEEPCOIN_API_SECRET", os.getenv("DEEPCOIN_SECRET_KEY", os.getenv("SECRET_KEY", "")))
-        self.passphrase = os.getenv("DEEPCOIN_PASSPHRASE", os.getenv("PASSPHRASE", os.getenv("API_PASSPHRASE", "")))
+        self.api_key = os.getenv("DEEPCOIN_API_KEY", "")
+        self.secret_key = os.getenv("DEEPCOIN_API_SECRET", os.getenv("DEEPCOIN_SECRET_KEY", ""))
+        self.passphrase = os.getenv("DEEPCOIN_PASSPHRASE", "")
         self.base_url = "https://api.deepcoin.com"
 
     def _get_server_time(self):
         return str(int(time.time() * 1000))
 
     def _sign(self, timestamp, method, request_path, body=""):
+        # 🚀 鉴权核心：这里的 request_path 必须是纯净路径，不含问号
         message = str(timestamp) + method.upper() + request_path + str(body)
         mac = hmac.new(bytes(self.secret_key, encoding='utf8'), bytes(message, encoding='utf-8'), digestmod='sha256')
         return base64.b64encode(mac.digest()).decode('utf-8')
@@ -28,19 +29,21 @@ class DeepcoinClient:
             logger.error("⚠️ Deepcoin API 密钥未配置！")
             return None
 
-        url = self.base_url + endpoint
         timestamp = self._get_server_time()
         body_str = ""
-        request_path = endpoint
+        
+        # 🚀 终极整改点：参与签名的路径永远锁定为纯净的 endpoint！
+        request_path = endpoint 
+        url = self.base_url + endpoint
 
         if method == "GET" and params:
-            # 深币要求 GET 参数按字母排序
+            # 真实请求的 URL 拼接参数去引路
             query_string = urlencode(sorted(params.items()))
-            request_path = endpoint + "?" + query_string
-            url = self.base_url + request_path
+            url = self.base_url + endpoint + "?" + query_string
         elif method == "POST" and params:
             body_str = json.dumps(params)
 
+        # 用纯净路径计算签名，完美契合深币后台的刁钻胃口
         sign = self._sign(timestamp, method, request_path, body_str)
 
         headers = {
@@ -57,7 +60,6 @@ class DeepcoinClient:
             else:
                 response = requests.post(url, headers=headers, data=body_str, timeout=10)
             
-            # 增加对非 JSON 返回的容错
             try:
                 res_json = response.json()
             except ValueError:
@@ -72,7 +74,6 @@ class DeepcoinClient:
             return None
 
     def get_current_price(self, symbol="ETH-USDT-SWAP"):
-        # 🚀 修复点：增加 instType="SWAP" 强制参数
         res = self._request("GET", "/deepcoin/market/tickers", {"instType": "SWAP"})
         if res and res.get("data"):
             for item in res["data"]:
@@ -81,8 +82,8 @@ class DeepcoinClient:
         return 0.0
 
     def get_available_balance(self, ccy="USDT"):
-        # 🚀 修复点：去掉 ccy 参数做全量查询，避免深币 GET 签名失败导致的 Expecting value 错误
-        res = self._request("GET", "/deepcoin/account/balance")
+        # 🚀 恢复传参：让路由不再 404
+        res = self._request("GET", "/deepcoin/account/balance", {"ccy": ccy})
         if res and res.get("data"):
             for item in res["data"]:
                 if item.get("ccy") == ccy:
@@ -114,6 +115,7 @@ class DeepcoinClient:
             time.sleep(0.5) 
             self._request("POST", "/deepcoin/trade/cancel-all", p1)
             self._request("POST", "/deepcoin/trade/cancel-algos-all", p1)
+            logger.info("🧹 双重撤单轰炸完成，盘口已物理级清空！")
         except Exception as e:
             logger.error(f"批量撤单发生异常: {e}")
 
