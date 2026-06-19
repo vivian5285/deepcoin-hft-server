@@ -84,12 +84,16 @@ class DeepcoinClient:
         return self._request("POST", "/trade/order", params)
 
     def place_conditional_order(self, symbol, side, trigger_price, amount):
+        """🚀 补丁2：深币硬止损优化，给予 5U 穿透让步，誓死保证止损成交"""
+        ord_px = trigger_price - 5.0 if side.upper() == "SELL" else trigger_price + 5.0
         params = {
             "instId": symbol, "tdMode": "cross",
             "side": "buy" if side.upper() == "LONG" else "sell",
             "ordType": "conditional", "sz": str(int(amount)),
-            "triggerPx": str(round(trigger_price, 2)), "ordPx": str(round(trigger_price, 2)),
-            "posSide": "long" if side.upper() == "LONG" else "short", "reduceOnly": True
+            "triggerPx": str(round(trigger_price, 2)), 
+            "ordPx": str(round(ord_px, 2)),
+            "posSide": "long" if side.upper() == "LONG" else "short", 
+            "reduceOnly": True
         }
         return self._request("POST", "/trade/order/algo", params)
 
