@@ -10,9 +10,10 @@ logger = logging.getLogger(__name__)
 
 class DeepcoinClient:
     def __init__(self):
-        self.api_key = os.getenv("DEEPCOIN_API_KEY", "")
-        self.secret_key = os.getenv("DEEPCOIN_SECRET_KEY", "")
-        self.passphrase = os.getenv("DEEPCOIN_PASSPHRASE", "")
+        # 🚀 V10.1 紧急修复：自动兼容多种 .env 命名习惯
+        self.api_key = os.getenv("DEEPCOIN_API_KEY", os.getenv("API_KEY", ""))
+        self.secret_key = os.getenv("DEEPCOIN_SECRET_KEY", os.getenv("SECRET_KEY", ""))
+        self.passphrase = os.getenv("DEEPCOIN_PASSPHRASE", os.getenv("PASSPHRASE", os.getenv("API_PASSPHRASE", "")))
         self.base_url = "https://api.deepcoin.com"
 
     def _get_server_time(self):
