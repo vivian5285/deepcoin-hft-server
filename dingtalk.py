@@ -21,7 +21,7 @@ def send_alert(title, data_dict):
         "msgtype": "markdown",
         "markdown": {
             "title": title,
-            "text": f"### {title}\n> **⏱ 战神大脑核对**：{datetime.now().strftime('%m-%d %H:%M:%S')}\n\n{text}\n\n---\n*🤖 ETH 万亿战神 V8.5 实时守护*"
+            "text": f"### {title}\n> **⏱ 战神核对**：{datetime.now().strftime('%m-%d %H:%M:%S')}\n\n{text}\n\n---\n*🤖 ETH 万亿战神 V8.6 全域防线守护中*"
         }
     }
     try:
@@ -29,24 +29,26 @@ def send_alert(title, data_dict):
     except Exception as e:
         logger.error(f"钉钉发送失败: {e}")
 
-def report_deepcoin_open(side, price, qty, tp_px, sl_px):
+def report_deepcoin_open(side, price, qty, tp1_px, tp2_px, sl_px):
     emoji = "🟩" if side == "LONG" else "🟥"
-    send_alert("⚔️ 战神建仓完毕 (单向一手)", {
+    send_alert("⚔️ 战神建仓完毕 (单向清场式介入)", {
         "防守方向": f"{emoji} {side}",
-        "入场均价": f"{price:.2f}",
-        "持仓头寸": f"{qty} 张",
-        "限价止盈 (3U目标)": f"{tp_px:.2f}",
-        "限价止损 (20U铁律)": f"{sl_px:.2f}"
+        "入场均价": f"`{price:.2f}`",
+        "标准头寸": f"`{qty}` 张",
+        "TP1 止盈 (7U)": f"`{tp1_px:.2f}`",
+        "TP2 止盈 (15U)": f"`{tp2_px:.2f}`",
+        "绝境止损 (20U)": f"`{sl_px:.2f}`"
     })
 
 def report_intervention(qty, entry_px, new_tp, new_sl):
-    send_alert("⚠️ 察觉人工干预：自动修正防线", {
-        "最新真实持仓": f"{qty} 张",
-        "最新均价": f"{entry_px:.2f}",
-        "动作": "已撤销旧单，重新铺设专属限价止盈/止损网",
-        "新止盈价": f"{new_tp:.2f}",
-        "新止损价": f"{new_sl:.2f}"
+    send_alert("⚠️ 察觉仓位异动：已自愈重新布防", {
+        "触发原因": "检测到人工加减仓，或 TP1 已落袋",
+        "最新残余仓位": f"`{qty}` 张",
+        "最新均价": f"`{entry_px:.2f}`",
+        "动作": "已撤销所有旧单，生成全新专属防线",
+        "剩余全仓止盈": f"`{new_tp:.2f}`",
+        "新限价止损": f"`{new_sl:.2f}`"
     })
 
 def report_deepcoin_clear(reason):
-    send_alert("🧹 阵地彻底清盘", {"触发原因": reason, "当前状态": "挂单已撤销，仓位已全平，空仓待命"})
+    send_alert("🧹 阵地彻底清盘", {"触发原因": reason, "当前状态": "残单已全撤，仓位已全平，战阵重置为空仓"})
