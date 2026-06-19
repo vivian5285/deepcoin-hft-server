@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import logging, time, threading
+import logging, time, threading, os
+from logging.handlers import RotatingFileHandler
 from deepcoin_client import deepcoin_client
 import dingtalk
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] Brain: %(message)s')
+if not os.path.exists('logs'): os.makedirs('logs')
+handler = RotatingFileHandler('logs/deepcoin_brain.log', maxBytes=5*1024*1024, backupCount=3)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] Brain: %(message)s', handlers=[handler, logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
 class DeepcoinProcessor:
@@ -19,64 +22,59 @@ class DeepcoinProcessor:
         
         self.tp1_diff = 7.0
         self.tp2_diff = 15.0
-        self.sl_diff = 20.0
+        self.sl_diff = 20.0  # ETH盘口绝对价差
         
         self.watched_qty = 0
         self.watched_entry = 0.0
         self.current_side = None
 
-        logger.info("🧠 深币大脑启动：并发锁护甲、5U止损让步、全域自愈已激活！")
+        logger.info("🧠 深币 V9.0 启动：轮询探针、并发锁、5U让步、全域自愈激活！")
 
     def _calculate_even_contracts(self):
         balance = deepcoin_client.get_available_balance()
         curr_px = deepcoin_client.get_current_price(self.symbol)
         if balance <= 0 or curr_px <= 0: return 0, balance
         
-        margin_to_use = balance * self.margin_rate
-        notional_value = margin_to_use * self.leverage
-        raw_qty = int(notional_value / (curr_px * self.face_value))
-        
-        even_qty = raw_qty if raw_qty % 2 == 0 else raw_qty - 1
-        return even_qty, balance
+        raw_qty = int((balance * self.margin_rate * self.leverage) / (curr_px * self.face_value))
+        return raw_qty if raw_qty % 2 == 0 else raw_qty - 1, balance
 
     def process_signal(self, payload: dict):
         action = payload.get("action", "").upper()
         if not action: return
 
-        # 🚀 补丁1：非阻塞全局锁，完美拦截 TV 的瞬间连发重复信号
-        if not self._lock.acquire(blocking=False):
-            logger.warning("🚨 正在执行战术部署，直接丢弃并发的重复信号！")
-            return
+        if not self._lock.acquire(blocking=False): return
             
         try:
             self.monitoring = False 
-            
             if action == "CLOSE":
                 self._close_all("接收到全平指令，撤单清仓")
                 return
 
             if action in ["LONG", "SHORT"]:
-                logger.info(f"📡 接收 {action} 信号，战前绝对清场！")
                 self._close_all(f"新兵入场 {action}，旧阵地彻底销毁")
-                time.sleep(1) 
-
+                
                 target_qty, balance = self._calculate_even_contracts()
-                if target_qty < 2:
-                    dingtalk.report_system_alert("可用弹药不足", f"当前余额 {balance:.2f}U 不足以开出最小偶数(2张)，放弃战机。")
-                    return
+                if target_qty < 2: return
                 
                 logger.info(f"🐺 动态核算完毕：可用 {balance:.2f}U，抢跑 {target_qty} 张 {action}")
-                deepcoin_client.place_market_order(self.symbol, action, target_qty)
                 
-                time.sleep(2)
-                pos = self._get_active_position()
+                for attempt in range(3):
+                    res = deepcoin_client.place_market_order(self.symbol, action, target_qty)
+                    if res and str(res.get("code")) == "0": break
+                    time.sleep(0.5)
+                
+                pos = None
+                for _ in range(5):
+                    time.sleep(1)
+                    pos = self._get_active_position()
+                    if pos and pos['size'] > 0: break
+
                 if pos and pos['size'] > 0:
                     self.current_side = action
                     self._protect_and_monitor(pos['size'], pos['entry_price'])
                 else:
-                    logger.error("🚨 抢跑失败或盘口滑点过大！")
+                    logger.error("🚨 抢跑失败或 REST API 缓存延迟！")
         finally:
-            # 保证无论发生什么，一定会释放锁
             self._lock.release()
 
     def _calc_tp_sl(self, entry_price):
@@ -88,15 +86,13 @@ class DeepcoinProcessor:
     def _protect_and_monitor(self, qty, entry_price):
         tp1_px, tp2_px, sl_px = self._calc_tp_sl(entry_price)
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-        
         qty_tp1 = int(qty / 2)
         qty_tp2 = qty - qty_tp1
 
         deepcoin_client.place_limit_order(self.symbol, close_side, tp1_px, qty_tp1, is_close=True)
-        if qty_tp2 > 0:
-            deepcoin_client.place_limit_order(self.symbol, close_side, tp2_px, qty_tp2, is_close=True)
-            
+        if qty_tp2 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, tp2_px, qty_tp2, is_close=True)
         deepcoin_client.place_conditional_order(self.symbol, close_side, sl_px, qty)
+        
         dingtalk.report_deepcoin_open(self.current_side, entry_price, qty, tp1_px, tp2_px, sl_px)
         
         self.watched_qty = qty
@@ -109,7 +105,6 @@ class DeepcoinProcessor:
             try:
                 pos = self._get_active_position()
                 actual_qty = int(pos['size']) if pos else 0
-                
                 if actual_qty == 0:
                     self._close_all("系统检测到空仓，重置清理残留挂单")
                     break
@@ -119,17 +114,15 @@ class DeepcoinProcessor:
                 if not actual_side: actual_side = "LONG" if actual_qty > 0 else "SHORT"
 
                 if actual_side != self.current_side and actual_side in ["LONG", "SHORT"]:
-                    logger.warning("🚨 严重违纪：反向干预持仓！强行对齐大盘！")
                     self._close_all("强行对齐：抹杀与信号相悖的仓位")
                     break
                 
                 if actual_qty != self.watched_qty or abs(actual_entry - self.watched_entry) > 0.5:
-                    logger.warning("⚠️ 察觉持仓异动或部分落袋！重新组装防线！")
                     deepcoin_client.cancel_all_open_orders(self.symbol)
                     time.sleep(1)
-                    
-                    self.watched_qty = actual_qty
-                    self.watched_entry = actual_entry
+                    with self._lock:
+                        self.watched_qty = actual_qty
+                        self.watched_entry = actual_entry
                         
                     tp1_px, tp2_px, sl_px = self._calc_tp_sl(actual_entry)
                     close_side = "SHORT" if self.current_side == "LONG" else "LONG"
@@ -146,8 +139,7 @@ class DeepcoinProcessor:
         if res and 'data' in res:
             for p in res['data']:
                 size = float(p.get("pos", 0))
-                if size > 0: 
-                    return {"size": size, "entry_price": float(p.get("avgPx", p.get("price", 0))), "posSide": p.get("posSide", "")}
+                if size > 0: return {"size": size, "entry_price": float(p.get("avgPx", p.get("price", 0))), "posSide": p.get("posSide", "")}
         return None
 
     def _close_all(self, reason: str):
