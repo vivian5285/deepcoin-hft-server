@@ -16,13 +16,16 @@ class DeepcoinProcessor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        self.margin_rate = 0.50
-        self.leverage = 20
+        # 🚀 测试期参数：30% 可用资金，10倍杠杆
+        self.margin_rate = 0.30
+        self.leverage = 10
         self.face_value = 0.1
         
-        # 👑 V10.0 深币 50/50 两段式 ATR 乘数
+        # 👑 策略同步：深币采用三段式 30/30/40 资金切割与 ATR 乘数
+        self.tp_ratios = [0.30, 0.30, 0.40]
         self.tp1_mult = 1.28
         self.tp2_mult = 2.50
+        self.tp3_mult = 3.60
         self.sl_mult = 0.92
         
         self.initial_qty = 0.0
@@ -31,11 +34,12 @@ class DeepcoinProcessor:
         self.current_side = None
         self.current_atr = 30.0
 
-        logger.info("🧠 深币 V10.0 启动：ATR自适应算价、保本推演雷达已激活！")
+        logger.info("🧠 深币实盘测试启动：30%本金/10x杠杆、三段式ATR自适应防线、保本推演已激活！")
 
-    def _calculate_even_contracts(self, curr_px, balance):
+    def _calculate_contracts(self, curr_px, balance):
+        # 取消偶数限制，只要根据本金算出总张数即可，方便后续按比例拆分
         raw_qty = int((balance * self.margin_rate * self.leverage) / (curr_px * self.face_value))
-        return raw_qty if raw_qty % 2 == 0 else raw_qty - 1
+        return raw_qty
 
     def process_signal(self, payload: dict):
         action = payload.get("action", "").upper()
@@ -62,8 +66,8 @@ class DeepcoinProcessor:
 
                 self._close_all(f"新兵入场 {action}")
                 
-                target_qty = self._calculate_even_contracts(curr_px, balance)
-                if target_qty < 2: return
+                target_qty = self._calculate_contracts(curr_px, balance)
+                if target_qty < 1: return # 深币至少开1张
                 
                 for attempt in range(3):
                     res = deepcoin_client.place_market_order(self.symbol, action, target_qty)
@@ -85,21 +89,34 @@ class DeepcoinProcessor:
 
     def _calc_tp_sl(self, entry_price):
         if self.current_side == "LONG":
-            return round(entry_price + self.current_atr * self.tp1_mult, 2), round(entry_price + self.current_atr * self.tp2_mult, 2), round(entry_price - self.current_atr * self.sl_mult, 2)
+            return (round(entry_price + self.current_atr * self.tp1_mult, 2), 
+                    round(entry_price + self.current_atr * self.tp2_mult, 2), 
+                    round(entry_price + self.current_atr * self.tp3_mult, 2), 
+                    round(entry_price - self.current_atr * self.sl_mult, 2))
         else:
-            return round(entry_price - self.current_atr * self.tp1_mult, 2), round(entry_price - self.current_atr * self.tp2_mult, 2), round(entry_price + self.current_atr * self.sl_mult, 2)
+            return (round(entry_price - self.current_atr * self.tp1_mult, 2), 
+                    round(entry_price - self.current_atr * self.tp2_mult, 2), 
+                    round(entry_price - self.current_atr * self.tp3_mult, 2), 
+                    round(entry_price + self.current_atr * self.sl_mult, 2))
 
     def _protect_and_monitor(self, qty, entry_price):
-        tp1_px, tp2_px, sl_px = self._calc_tp_sl(entry_price)
+        tp1_px, tp2_px, tp3_px, sl_px = self._calc_tp_sl(entry_price)
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-        qty_tp1 = int(qty / 2)
-        qty_tp2 = qty - qty_tp1
+        
+        # 严格按照 30% 30% 40% 切割深币整数张数
+        qty1 = int(qty * self.tp_ratios[0])
+        qty2 = int(qty * self.tp_ratios[1])
+        qty3 = int(qty - qty1 - qty2)
 
-        deepcoin_client.place_limit_order(self.symbol, close_side, tp1_px, qty_tp1, is_close=True)
-        if qty_tp2 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, tp2_px, qty_tp2, is_close=True)
+        # 分批挂出限价止盈
+        if qty1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, tp1_px, qty1, is_close=True)
+        if qty2 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, tp2_px, qty2, is_close=True)
+        if qty3 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, tp3_px, qty3, is_close=True)
+        
+        # 挂出全仓条件止损
         deepcoin_client.place_conditional_order(self.symbol, close_side, sl_px, qty)
         
-        dingtalk.report_deepcoin_open(self.current_side, entry_price, qty, tp1_px, tp2_px, sl_px, self.current_atr)
+        dingtalk.report_deepcoin_open(self.current_side, entry_price, qty, [tp1_px, tp2_px, tp3_px], sl_px, self.current_atr)
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
@@ -125,21 +142,19 @@ class DeepcoinProcessor:
                     with self._lock:
                         self.watched_qty, self.watched_entry = actual_qty, actual_entry
                         
+                    _, _, tp3_px, original_sl_px = self._calc_tp_sl(actual_entry)
                     close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-                    is_breakeven = actual_qty < (self.initial_qty * 0.8) # TP1吃单检测
                     
-                    if self.current_side == "LONG":
-                        tp_safe = round(actual_entry + self.current_atr * self.tp2_mult, 2)
-                        sl_safe = round(actual_entry, 2) if is_breakeven else round(actual_entry - self.current_atr * self.sl_mult, 2)
-                    else:
-                        tp_safe = round(actual_entry - self.current_atr * self.tp2_mult, 2)
-                        sl_safe = round(actual_entry, 2) if is_breakeven else round(actual_entry + self.current_atr * self.sl_mult, 2)
+                    is_breakeven = actual_qty < (self.initial_qty * 0.8)
                     
-                    deepcoin_client.place_limit_order(self.symbol, close_side, tp_safe, actual_qty, is_close=True)
+                    # 重新布防：剩余仓位全挂 TP3，如果已触发保本，则止损移至开仓均价
+                    sl_safe = round(actual_entry, 2) if is_breakeven else original_sl_px
+                    
+                    deepcoin_client.place_limit_order(self.symbol, close_side, tp3_px, actual_qty, is_close=True)
                     deepcoin_client.place_conditional_order(self.symbol, close_side, sl_safe, actual_qty)
                     
                     action_msg = "已提损至保本" if is_breakeven else "维持标准防线"
-                    dingtalk.report_intervention(actual_qty, actual_entry, tp_safe, sl_safe, action_msg)
+                    dingtalk.report_intervention(actual_qty, actual_entry, tp3_px, sl_safe, action_msg)
 
             except Exception as e: logger.error(f"哨兵出错: {e}")
             time.sleep(3)
