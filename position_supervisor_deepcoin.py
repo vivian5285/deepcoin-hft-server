@@ -16,7 +16,6 @@ class DeepcoinProcessor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        # 🚀 测试期参数：30% 可用资金，10倍杠杆
         self.margin_rate = 0.30
         self.leverage = 10
         self.face_value = 0.1
@@ -33,7 +32,7 @@ class DeepcoinProcessor:
         self.current_side = None
         self.current_atr = 30.0
 
-        logger.info("🧠 深币 V10 终极版启动：TV面板参数透传已激活，30%资金/10x杠杆就绪！")
+        logger.info("🧠 深币 V10 启动：官方最新API对齐、30%资金/10X测试就绪！")
 
     def _calculate_contracts(self, curr_px, balance):
         raw_qty = int((balance * self.margin_rate * self.leverage) / (curr_px * self.face_value))
@@ -42,13 +41,7 @@ class DeepcoinProcessor:
     def process_signal(self, payload: dict):
         action = payload.get("action", "").upper()
         tv_price = float(payload.get("price", 0.0))
-        
-        # 🚀 核心升级：实时读取 TV 传过来的策略面板倍数！
         self.current_atr = float(payload.get("atr", 30.0))
-        self.tp1_mult = float(payload.get("tp1_m", 1.28))
-        self.tp2_mult = float(payload.get("tp2_m", 2.50))
-        self.tp3_mult = float(payload.get("tp3_m", 3.60))
-        self.sl_mult  = float(payload.get("sl_m", 0.92))
         
         if not action: return
         if not self._lock.acquire(blocking=False): return
@@ -110,7 +103,7 @@ class DeepcoinProcessor:
     def _protect_and_monitor(self, qty, entry_price):
         tp1_px, tp2_px, tp3_px, sl_px = self._calc_tp_sl(entry_price)
         
-        # 🚨 严格区分平仓方向
+        # 🚨 严格区分平仓方向：平多=卖出(sell)+多头(long)，平空=买入(buy)+空头(short)
         close_side = "sell" if self.current_side == "LONG" else "buy"
         pos_side = "long" if self.current_side == "LONG" else "short"
         
