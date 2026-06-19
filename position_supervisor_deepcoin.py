@@ -16,20 +16,17 @@ class DeepcoinProcessor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        # V10.4 测试期：50%仓位 + 20倍杠杆跨越深币碎单拦截
         self.margin_rate = 0.50 
         self.leverage = 20
         self.face_value = 0.1
         
         self.tp_ratios = [0.30, 0.30, 0.40]
-        # 初始化占位符，实盘时会被 JSON 覆盖
         self.tp1_mult = 1.28
         self.tp2_mult = 2.45
         self.tp3_mult = 3.45
         self.sl_mult = 1.03
-        self.trail_tight = 0.55
+        self.current_trail_factor = 0.50 # V10.6 专属
         self.current_atr = 30.0
-        self.current_adx = 20.0
         
         self.initial_qty = 0.0
         self.watched_qty = 0.0
@@ -38,7 +35,7 @@ class DeepcoinProcessor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 深币 V10.4 大脑已加载：支持动态 SL 接收与高级 ADX 追踪止盈！")
+        logger.info("🧠 深币 V10.6 极简大脑加载完毕：完全执行 TV 透传指令！")
 
     def _calculate_contracts(self, curr_px, balance):
         return int((balance * self.margin_rate * self.leverage) / (curr_px * self.face_value))
@@ -47,14 +44,12 @@ class DeepcoinProcessor:
         action = payload.get("action", "").upper()
         tv_price = float(payload.get("price", 0.0))
         
-        # 🚀 完整解析 V10.4 的高级 JSON
         self.current_atr = float(payload.get("atr", 30.0))
-        self.current_adx = float(payload.get("adx", 20.0))
         self.tp1_mult = float(payload.get("tp1_m", 1.28))
         self.tp2_mult = float(payload.get("tp2_m", 2.45))
         self.tp3_mult = float(payload.get("tp3_m", 3.45))
-        self.sl_mult  = float(payload.get("sl_m", 1.03)) # 获取三档自适应止损
-        self.trail_tight = float(payload.get("tt", 0.55))
+        self.sl_mult  = float(payload.get("sl_m", 1.03)) 
+        self.current_trail_factor = float(payload.get("trail_factor", 0.50)) # 🚀 V10.6 专属：接管追踪系数
         
         if not action: return
         if not self._lock.acquire(blocking=False): return
@@ -62,8 +57,7 @@ class DeepcoinProcessor:
         try:
             self.monitoring = False 
             if action == "CLOSE":
-                # 🚀 对应你的快速反转保护 (6K线斩仓)
-                self._close_all("紧急斩仓：触发 V10.4 快速反转保护或极限风控！")
+                self._close_all("紧急斩仓：触发 V10.6 快速反转保护或极限风控！")
                 return
 
             if action in ["LONG", "SHORT"]:
@@ -157,18 +151,8 @@ class DeepcoinProcessor:
                 if self.current_side == "LONG": self.best_price = max(self.best_price, curr_px)
                 else: self.best_price = min(self.best_price, curr_px)
 
-                # 🚀 V10.4 完美复刻的三档追踪乘数引擎
-                if self.current_adx > 28:
-                    tf_multiplier = 0.55
-                elif self.current_adx > 20:
-                    tf_multiplier = 0.68
-                else:
-                    tf_multiplier = 0.90
-                    
-                trail_factor = self.trail_tight * tf_multiplier
-                trail_offset = self.current_atr * trail_factor * 0.45 
-                
-                # 保本确认：吃掉 TP1 后仓位必然变小
+                # 🚀 V10.6 极简追踪：删去复杂的 ADX 判定，听从 TV 的绝对指挥！
+                trail_offset = self.current_atr * self.current_trail_factor * 0.45 
                 is_breakeven = actual_qty < (self.initial_qty * 0.8)
 
                 if is_breakeven:
@@ -177,7 +161,6 @@ class DeepcoinProcessor:
                     
                     if self.current_side == "LONG":
                         calculated_sl = round(self.best_price - trail_offset, 2)
-                        # 强力保本锁：决不允许新防线低于开仓均价！
                         new_sl = max(calculated_sl, self.watched_entry, self.current_sl)
                         
                         if new_sl - self.current_sl > 2.0:
@@ -191,7 +174,6 @@ class DeepcoinProcessor:
                             
                     else:
                         calculated_sl = round(self.best_price + trail_offset, 2)
-                        # 强力保本锁：决不允许新防线高于开仓均价！
                         new_sl = min(calculated_sl, self.watched_entry, self.current_sl)
                         
                         if self.current_sl - new_sl > 2.0:
@@ -233,7 +215,6 @@ class DeepcoinProcessor:
         deepcoin_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.5)
         
-        # 强制清仓死循环锁
         max_retries = 8
         for i in range(max_retries):
             deepcoin_client.close_all_positions(self.symbol)
