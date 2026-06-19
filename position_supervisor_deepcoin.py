@@ -13,25 +13,24 @@ class DeepcoinProcessor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        self.face_value = 0.1         # 1张 = 0.1 ETH
-        self.target_net_profit = 3.0  # 止盈目标 3U
-        self.max_loss_usd = 20.0      # 止损铁律 20U 全头寸
-        self.fee_rate = 0.0006        # 手续费率
-        self.always_one_hand = 1      # 永远一手
+        # 👑 核心战术参数
+        self.standard_hand = 2      # “永远一手”的定义：每次开 2 张（为了方便分批止盈）
+        self.tp1_diff = 7.0         # TP1：开仓价 ± 7U
+        self.tp2_diff = 15.0        # TP2：开仓价 ± 15U
+        self.sl_diff = 20.0         # 全头寸止损：开仓价 ± 20U
         
         self.watched_qty = 0
         self.watched_entry = 0.0
         self.current_side = None
 
-        logger.info("🧠 智慧大脑 V8.5 已启动：开启单向一手、双向限价与反干预自愈！")
+        logger.info("🧠 智慧大脑 V8.6 已启动：双阶止盈(7/15)、铁血止损(20)与反干预自愈就绪！")
 
     def process_signal(self, payload: dict):
         action = payload.get("action", "").upper()
         if not action: return
 
-        # 1. 信号洁癖：收到任何新信号，先撤单再全平，保持头寸绝对干净
-        with self._lock:
-            self.monitoring = False 
+        # 1. 信号洁癖：新TV信号到达，必须先撤单再全平，保持头寸绝对干净
+        with self._lock: self.monitoring = False 
         
         if action == "CLOSE":
             self._close_all("接收到大脑主控全平指令")
@@ -42,14 +41,14 @@ class DeepcoinProcessor:
             self._close_all(f"新指令 {action} 入场，清除旧阵地残余")
             time.sleep(1) # 等待交易所结算
 
-            # 2. 开仓：永远只开一手 (市价抢入或极速限价)
+            # 2. 永远开一手：保持阵地纯净，同向不加，反向重开
             current_px = deepcoin_client.get_current_price(self.symbol)
             if current_px <= 0: return
             
-            logger.info(f"🐺 执行绝对单向开仓：方向 {action}，头寸 {self.always_one_hand}张")
-            deepcoin_client.place_limit_order(self.symbol, action, current_px, self.always_one_hand)
+            logger.info(f"🐺 执行绝对单向开仓：方向 {action}，标准头寸 {self.standard_hand}张")
+            deepcoin_client.place_limit_order(self.symbol, action, current_px, self.standard_hand)
             
-            # 等待成交
+            # 等待成交并布防
             time.sleep(2)
             pos = self._get_active_position()
             if pos and pos['size'] > 0:
@@ -59,75 +58,74 @@ class DeepcoinProcessor:
                 logger.error("🚨 开仓未成交或盘口滑点过大！")
 
     def _protect_and_monitor(self, qty, entry_price):
-        """部署双向防线并启动雷达"""
-        tp_px, sl_px = self._calc_tp_sl(qty, entry_price)
-        
-        # 挂止盈限价单
+        """部署双阶止盈与全头寸止损防线"""
+        tp1_px, tp2_px, sl_px = self._calc_tp_sl(entry_price)
         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
-        deepcoin_client.place_limit_order(self.symbol, close_side, tp_px, qty, is_close=True)
-        # 挂止损条件单 (如果交易所限制，哨兵也会进行软止损)
+        
+        # 拆分仓位用于双阶止盈
+        qty_tp1 = max(1, int(qty / 2))
+        qty_tp2 = int(qty - qty_tp1)
+
+        # 挂止盈限价单
+        deepcoin_client.place_limit_order(self.symbol, close_side, tp1_px, qty_tp1, is_close=True)
+        if qty_tp2 > 0:
+            deepcoin_client.place_limit_order(self.symbol, close_side, tp2_px, qty_tp2, is_close=True)
+            
+        # 挂止损条件单 (全头寸统一止损)
         deepcoin_client.place_conditional_order(self.symbol, close_side, sl_px, qty)
         
-        dingtalk.report_deepcoin_open(self.current_side, entry_price, qty, tp_px, sl_px)
+        dingtalk.report_deepcoin_open(self.current_side, entry_price, qty, tp1_px, tp2_px, sl_px)
         
-        # 启动防干预巡更
+        # 启动防干预巡更自查
         with self._lock:
             self.watched_qty = qty
             self.watched_entry = entry_price
             self.monitoring = True
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
-    def _calc_tp_sl(self, qty, entry_price):
-        """计算止盈止损价格"""
-        notional = entry_price * qty * self.face_value
-        est_fee = notional * self.fee_rate * 2
-        
-        # 止盈 3U 对应价差
-        tp_diff = (self.target_net_profit + est_fee) / (qty * self.face_value)
-        # 止损 20U 对应价差
-        sl_diff = self.max_loss_usd / (qty * self.face_value)
-        
+    def _calc_tp_sl(self, entry_price):
+        """核心算法：计算绝对价差止盈止损"""
         if self.current_side == "LONG":
-            return entry_price + tp_diff, entry_price - sl_diff
+            return entry_price + self.tp1_diff, entry_price + self.tp2_diff, entry_price - self.sl_diff
         else:
-            return entry_price - tp_diff, entry_price + sl_diff
+            return entry_price - self.tp1_diff, entry_price - self.tp2_diff, entry_price + self.sl_diff
 
     def _sentinel_loop(self):
-        """哨兵巡更：防人工干预与自动自愈"""
-        logger.info("👀 防御哨兵已升空，每 3 秒核实一次阵地数据...")
+        """全域自审自查：防人工干预与自动自愈"""
         while self.monitoring:
             try:
                 pos = self._get_active_position()
                 actual_qty = int(pos['size']) if pos else 0
                 
-                # 场景 1：完全平仓 (碰触止盈止损，或手动全平)
+                # 场景 1：碰触止盈/止损，或手动全平导致仓位归零
                 if actual_qty == 0:
-                    logger.info("✨ 发现阵地为空！已触达防线或被手动清空。")
+                    logger.info("✨ 发现阵地为空！自动清理残留废单。")
                     self._close_all("系统检测到空仓，重置清理残留挂单")
                     break
                     
                 actual_entry = pos['entry_price']
                 
-                # 场景 2：发生人工干预 (加减仓导致张数或均价偏移)
+                # 场景 2：发生人工干预 (加减仓或只触发了TP1)
                 if actual_qty != self.watched_qty or abs(actual_entry - self.watched_entry) > 0.5:
-                    logger.warning(f"⚠️ 察觉持仓异动！原={self.watched_qty}张，现={actual_qty}张。启动防线重装机制！")
+                    logger.warning(f"⚠️ 察觉持仓异动或部分止盈！启动防线重装机制！")
                     
-                    # 1. 撤销旧防线
+                    # 撤销所有旧挂单
                     deepcoin_client.cancel_all_open_orders(self.symbol)
                     time.sleep(1)
                     
-                    # 2. 更新记忆并重新布防
                     with self._lock:
                         self.watched_qty = actual_qty
                         self.watched_entry = actual_entry
                         
-                    tp_px, sl_px = self._calc_tp_sl(actual_qty, actual_entry)
+                    # 以新的张数和均价重新计算并挂单
+                    tp1_px, tp2_px, sl_px = self._calc_tp_sl(actual_entry)
                     close_side = "SHORT" if self.current_side == "LONG" else "LONG"
                     
-                    deepcoin_client.place_limit_order(self.symbol, close_side, tp_px, actual_qty, is_close=True)
+                    # 此时如果有零头，统一挂最高级别的止盈
+                    deepcoin_client.place_limit_order(self.symbol, close_side, tp2_px, actual_qty, is_close=True)
                     deepcoin_client.place_conditional_order(self.symbol, close_side, sl_px, actual_qty)
                     
-                    dingtalk.report_intervention(actual_qty, actual_entry, tp_px, sl_px)
+                    dingtalk.report_intervention(actual_qty, actual_entry, tp2_px, sl_px)
 
             except Exception as e:
                 logger.error(f"哨兵轮询出错: {e}")
@@ -147,7 +145,6 @@ class DeepcoinProcessor:
         time.sleep(0.5)
         deepcoin_client.close_all_positions(self.symbol)
         with self._lock: self.monitoring = False
-        if reason:
-            dingtalk.report_deepcoin_clear(reason)
+        if reason: dingtalk.report_deepcoin_clear(reason)
 
 deepcoin_processor = DeepcoinProcessor()
