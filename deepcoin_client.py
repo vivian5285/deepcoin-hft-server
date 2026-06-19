@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, time, hmac, hashlib, json, requests, logging, base64
+import os, hmac, hashlib, base64, json, logging, requests, time
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 from dotenv import load_dotenv
 
@@ -10,121 +11,119 @@ logger = logging.getLogger(__name__)
 
 class DeepcoinClient:
     def __init__(self):
-        self.api_key = os.getenv("DEEPCOIN_API_KEY", "")
-        self.secret_key = os.getenv("DEEPCOIN_API_SECRET", os.getenv("DEEPCOIN_SECRET_KEY", ""))
-        self.passphrase = os.getenv("DEEPCOIN_PASSPHRASE", "")
+        # 兼容各种环境变量命名
+        self.api_key = os.getenv("DEEPCOIN_API_KEY", os.getenv("API_KEY", ""))
+        self.secret_key = os.getenv("DEEPCOIN_API_SECRET", os.getenv("DEEPCOIN_SECRET_KEY", os.getenv("SECRET_KEY", "")))
+        self.passphrase = os.getenv("DEEPCOIN_PASSPHRASE", os.getenv("PASSPHRASE", os.getenv("API_PASSPHRASE", "")))
         self.base_url = "https://api.deepcoin.com"
 
-    def _get_server_time(self):
-        return str(int(time.time() * 1000))
+    def _get_timestamp(self):
+        # 👑 V7 核心：ISO8601 UTC 时间戳
+        return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 
-    def _sign(self, timestamp, method, request_path, body=""):
-        # 🚀 鉴权核心：这里的 request_path 必须是纯净路径，不含问号
-        message = str(timestamp) + method.upper() + request_path + str(body)
-        mac = hmac.new(bytes(self.secret_key, encoding='utf8'), bytes(message, encoding='utf-8'), digestmod='sha256')
-        return base64.b64encode(mac.digest()).decode('utf-8')
+    def _sign(self, timestamp: str, method: str, request_path: str, body: str = ""):
+        message = (str(timestamp) + str(method.upper()) + str(request_path) + str(body)).encode('utf-8')
+        h = hmac.new(self.secret_key.encode('utf-8'), message, hashlib.sha256)
+        return base64.b64encode(h.digest()).decode('utf-8')
 
-    def _request(self, method, endpoint, params=None):
+    def _request(self, method: str, endpoint: str, params: dict = None):
         if not self.api_key or not self.secret_key:
             logger.error("⚠️ Deepcoin API 密钥未配置！")
             return None
 
-        timestamp = self._get_server_time()
-        body_str = ""
-        
-        # 🚀 终极整改点：参与签名的路径永远锁定为纯净的 endpoint！
-        request_path = endpoint 
-        url = self.base_url + endpoint
-
-        if method == "GET" and params:
-            # 真实请求的 URL 拼接参数去引路
-            query_string = urlencode(sorted(params.items()))
-            url = self.base_url + endpoint + "?" + query_string
-        elif method == "POST" and params:
-            body_str = json.dumps(params)
-
-        # 用纯净路径计算签名，完美契合深币后台的刁钻胃口
-        sign = self._sign(timestamp, method, request_path, body_str)
-
-        headers = {
-            "Content-Type": "application/json",
-            "Deepcoin-Access-Key": self.api_key,
-            "Deepcoin-Access-Sign": sign,
-            "Deepcoin-Access-Timestamp": timestamp,
-            "Deepcoin-Access-Passphrase": self.passphrase
-        }
-
-        try:
-            if method == "GET":
-                response = requests.get(url, headers=headers, timeout=10)
-            else:
-                response = requests.post(url, headers=headers, data=body_str, timeout=10)
+        # 确保加上 /deepcoin 前缀
+        if not endpoint.startswith("/deepcoin/"): 
+            endpoint = "/deepcoin" + (endpoint if endpoint.startswith("/") else "/" + endpoint)
             
-            try:
-                res_json = response.json()
-            except ValueError:
-                logger.error(f"Deepcoin 返回非 JSON 数据: {response.text}")
-                return None
-
+        timestamp = self._get_timestamp()
+        
+        # 👑 V7 核心：GET 请求参数必须拼接在 URL 后面参与签名，POST body 必须转 JSON
+        body_str = json.dumps(params, separators=(',', ':')) if params and method.upper() != "GET" else ""
+        request_path = f"{endpoint}?{'&'.join([f'{k}={v}' for k, v in params.items()])}" if method.upper() == "GET" and params else endpoint
+        
+        signature = self._sign(timestamp, method, request_path, body_str)
+        
+        # 👑 V7 核心：全新的 DC-ACCESS 请求头
+        headers = {
+            "Content-Type": "application/json", 
+            "DC-ACCESS-KEY": self.api_key,
+            "DC-ACCESS-SIGN": signature, 
+            "DC-ACCESS-TIMESTAMP": timestamp,
+            "DC-ACCESS-PASSPHRASE": self.passphrase
+        }
+        
+        try:
+            url = f"{self.base_url}{request_path}"
+            resp = requests.request(method.upper(), url, data=body_str if body_str else None, headers=headers, timeout=10)
+            res_json = resp.json()
             if str(res_json.get("code")) != "0":
                 logger.warning(f"Deepcoin API 业务异常: {res_json}")
             return res_json
-        except Exception as e:
-            logger.error(f"Deepcoin 请求失败 {endpoint}: {e}")
+        except Exception as e: 
+            logger.error(f"Deepcoin 请求失败 {endpoint}: {e} | 返回: {resp.text if 'resp' in locals() else 'N/A'}")
             return None
 
-    def get_current_price(self, symbol="ETH-USDT-SWAP"):
-        res = self._request("GET", "/deepcoin/market/tickers", {"instType": "SWAP"})
-        if res and res.get("data"):
+    def get_available_balance(self, ccy="USDT"):
+        # 👑 V7 核心：接口变更为 /account/balances，字段名为 availBal
+        res = self._request("GET", "/account/balances", {"instType": "SWAP"})
+        if isinstance(res, dict) and "data" in res:
             for item in res["data"]:
-                if item.get("instId") == symbol:
-                    return float(item.get("last", 0))
+                if item.get("ccy") == ccy: 
+                    return float(item.get("availBal", 0)) 
         return 0.0
 
-    def get_available_balance(self, ccy="USDT"):
-        # 🚀 恢复传参：让路由不再 404
-        res = self._request("GET", "/deepcoin/account/balance", {"ccy": ccy})
-        if res and res.get("data"):
-            for item in res["data"]:
-                if item.get("ccy") == ccy:
-                    return float(item.get("availEq", 0))
+    def get_current_price(self, symbol="ETH-USDT-SWAP"):
+        # 👑 V7 核心：接口变更为 /market/ticker
+        res = self._request("GET", "/market/ticker", {"instId": symbol})
+        if isinstance(res, dict) and "data" in res and len(res["data"]) > 0:
+            price = res["data"][0].get("last")
+            return float(price) if price else 0.0
         return 0.0
 
     def get_position_info(self, symbol="ETH-USDT-SWAP"):
-        res = self._request("GET", "/deepcoin/account/positions", {"instId": symbol})
-        return res
+        return self._request("GET", "/account/positions", {"instType": "SWAP", "instId": symbol})
 
     def place_market_order(self, symbol, side, pos_side, qty):
-        params = {"instId": symbol, "tdMode": "cross", "side": side, "posSide": pos_side, "ordType": "market", "sz": str(int(qty))}
-        return self._request("POST", "/deepcoin/trade/order", params)
+        params = {
+            "instId": symbol, "tdMode": "cross",
+            "side": side, "posSide": pos_side,
+            "ordType": "market", "sz": str(int(qty)),
+            "mrgPosition": "merge"
+        }
+        return self._request("POST", "/trade/order", params)
 
     def place_limit_order(self, symbol, side, pos_side, px, qty):
-        params = {"instId": symbol, "tdMode": "cross", "side": side, "posSide": pos_side, "ordType": "limit", "px": str(px), "sz": str(int(qty))}
-        return self._request("POST", "/deepcoin/trade/order", params)
+        params = {
+            "instId": symbol, "tdMode": "cross",
+            "side": side, "posSide": pos_side,
+            "ordType": "limit", "sz": str(int(qty)),
+            "px": str(px), "mrgPosition": "merge"
+        }
+        return self._request("POST", "/trade/order", params)
 
     def place_conditional_order(self, symbol, side, pos_side, trigger_px, qty):
-        params = {"instId": symbol, "tdMode": "cross", "side": side, "posSide": pos_side, "ordType": "conditional", "triggerPx": str(trigger_px), "ordPx": str(trigger_px), "sz": str(int(qty))}
-        return self._request("POST", "/deepcoin/trade/order-algo", params)
+        params = {
+            "instId": symbol, "tdMode": "cross",
+            "side": side, "posSide": pos_side,
+            "ordType": "conditional", "sz": str(int(qty)),
+            "triggerPx": str(trigger_px), "ordPx": str(trigger_px),
+            "reduceOnly": True
+        }
+        return self._request("POST", "/trade/order/algo", params)
 
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
         try:
-            inst_id_base = symbol.replace("-SWAP", "").replace("-", "")
-            p1 = {"InstrumentID": inst_id_base, "ProductGroup": "SwapU", "IsCrossMargin": 1, "IsMergeMode": 1}
-            self._request("POST", "/deepcoin/trade/cancel-all", p1)
-            self._request("POST", "/deepcoin/trade/cancel-algos-all", p1)
-            time.sleep(0.5) 
-            self._request("POST", "/deepcoin/trade/cancel-all", p1)
-            self._request("POST", "/deepcoin/trade/cancel-algos-all", p1)
+            # 👑 融合版：保留我们设计的 0.5 秒双重轰炸防线，使用 V7 最新接口
+            self._request("POST", "/trade/cancel-batch-orders", {"instId": symbol})
+            self._request("POST", "/trade/cancel-algo-orders", {"instId": symbol})
+            time.sleep(0.5)
+            self._request("POST", "/trade/cancel-batch-orders", {"instId": symbol})
+            self._request("POST", "/trade/cancel-algo-orders", {"instId": symbol})
             logger.info("🧹 双重撤单轰炸完成，盘口已物理级清空！")
         except Exception as e:
-            logger.error(f"批量撤单发生异常: {e}")
+            logger.error(f"撤单异常: {e}")
 
     def close_all_positions(self, symbol="ETH-USDT-SWAP"):
-        try:
-            res = self._request("POST", "/deepcoin/trade/close-position", {"instId": symbol, "mgnMode": "cross", "autoCxl": True})
-            return res
-        except Exception as e:
-            logger.error(f"全平请求异常: {e}")
-            return None
+        return self._request("POST", "/trade/close-position", {"instId": symbol, "mrgPosition": "merge"})
 
 deepcoin_client = DeepcoinClient()
