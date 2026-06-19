@@ -20,27 +20,24 @@ class DeepcoinProcessor:
         self.leverage = 20
         self.face_value = 0.1
         
-        # 👑 战术防线：7/15 止盈，30 绝对价差止损
         self.tp1_diff = 7.0
         self.tp2_diff = 15.0
-        self.sl_diff = 30.0  # 统一提升至 30 美金抗震价差
+        self.sl_diff = 30.0
         
         self.watched_qty = 0
         self.watched_entry = 0.0
         self.current_side = None
 
-        logger.info("🧠 深币 V9.1 启动：轮询探针、并发锁、5U让步、30美金止损、全域自愈激活！")
+        logger.info("🧠 深币 V9.2 启动：防追高防火墙、轮询探针、并发锁、全域自愈激活！")
 
-    def _calculate_even_contracts(self):
-        balance = deepcoin_client.get_available_balance()
-        curr_px = deepcoin_client.get_current_price(self.symbol)
-        if balance <= 0 or curr_px <= 0: return 0, balance
-        
+    def _calculate_even_contracts(self, curr_px, balance):
         raw_qty = int((balance * self.margin_rate * self.leverage) / (curr_px * self.face_value))
-        return raw_qty if raw_qty % 2 == 0 else raw_qty - 1, balance
+        return raw_qty if raw_qty % 2 == 0 else raw_qty - 1
 
     def process_signal(self, payload: dict):
         action = payload.get("action", "").upper()
+        tv_price = payload.get("price", 0.0) # 获取 TV 传过来的信号触发价
+        
         if not action: return
 
         if not self._lock.acquire(blocking=False): return
@@ -52,9 +49,22 @@ class DeepcoinProcessor:
                 return
 
             if action in ["LONG", "SHORT"]:
+                curr_px = deepcoin_client.get_current_price(self.symbol)
+                balance = deepcoin_client.get_available_balance()
+                if balance <= 0 or curr_px <= 0: return
+
+                # 🚀 隐患1修复：防超时/防滑点验证
+                if tv_price > 0:
+                    price_diff = abs(curr_px - float(tv_price))
+                    if price_diff > 5.0:
+                        msg = f"现价 `{curr_px}` 与 TV信号价 `{tv_price}` 偏差达 **{price_diff:.2f} 美金**！已拦截本次信号，宁可踏空，绝不追高。"
+                        logger.warning(f"🚨 {msg}")
+                        dingtalk.report_system_alert("网络超时/滑点保护拦截", msg)
+                        return
+
                 self._close_all(f"新兵入场 {action}，旧阵地彻底销毁")
                 
-                target_qty, balance = self._calculate_even_contracts()
+                target_qty = self._calculate_even_contracts(curr_px, balance)
                 if target_qty < 2: return
                 
                 logger.info(f"🐺 动态核算完毕：可用 {balance:.2f}U，抢跑 {target_qty} 张 {action}")
@@ -129,7 +139,6 @@ class DeepcoinProcessor:
                     tp1_px, tp2_px, sl_px = self._calc_tp_sl(actual_entry)
                     close_side = "SHORT" if self.current_side == "LONG" else "LONG"
                     
-                    # 自愈机制：剩余头寸全数挂最高止盈 (15价差)
                     deepcoin_client.place_limit_order(self.symbol, close_side, tp2_px, actual_qty, is_close=True)
                     deepcoin_client.place_conditional_order(self.symbol, close_side, sl_px, actual_qty)
                     dingtalk.report_intervention(actual_qty, actual_entry, tp2_px, sl_px)
