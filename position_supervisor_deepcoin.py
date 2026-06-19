@@ -16,29 +16,29 @@ class DeepcoinProcessor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        # 🚀 V10.1 资金提权：50%本金 + 20倍杠杆，誓死跨过 17U 碎单门槛，铺开火力网！
+        # V10.4 测试期：50%仓位 + 20倍杠杆跨越深币碎单拦截
         self.margin_rate = 0.50 
         self.leverage = 20
         self.face_value = 0.1
         
         self.tp_ratios = [0.30, 0.30, 0.40]
+        # 初始化占位符，实盘时会被 JSON 覆盖
         self.tp1_mult = 1.28
-        self.tp2_mult = 2.50
-        self.tp3_mult = 3.60
-        self.sl_mult = 0.92
+        self.tp2_mult = 2.45
+        self.tp3_mult = 3.45
+        self.sl_mult = 1.03
         self.trail_tight = 0.55
+        self.current_atr = 30.0
+        self.current_adx = 20.0
         
         self.initial_qty = 0.0
         self.watched_qty = 0.0
         self.watched_entry = 0.0
         self.current_side = None
-        self.current_atr = 30.0
-        self.current_adx = 20.0
-        
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 深币 V10.1 终极缝合版启动：高配资金提权、死循环清仓锁已激活！")
+        logger.info("🧠 深币 V10.4 大脑已加载：支持动态 SL 接收与高级 ADX 追踪止盈！")
 
     def _calculate_contracts(self, curr_px, balance):
         return int((balance * self.margin_rate * self.leverage) / (curr_px * self.face_value))
@@ -47,12 +47,13 @@ class DeepcoinProcessor:
         action = payload.get("action", "").upper()
         tv_price = float(payload.get("price", 0.0))
         
+        # 🚀 完整解析 V10.4 的高级 JSON
         self.current_atr = float(payload.get("atr", 30.0))
         self.current_adx = float(payload.get("adx", 20.0))
         self.tp1_mult = float(payload.get("tp1_m", 1.28))
-        self.tp2_mult = float(payload.get("tp2_m", 2.50))
-        self.tp3_mult = float(payload.get("tp3_m", 3.60))
-        self.sl_mult  = float(payload.get("sl_m", 0.92))
+        self.tp2_mult = float(payload.get("tp2_m", 2.45))
+        self.tp3_mult = float(payload.get("tp3_m", 3.45))
+        self.sl_mult  = float(payload.get("sl_m", 1.03)) # 获取三档自适应止损
         self.trail_tight = float(payload.get("tt", 0.55))
         
         if not action: return
@@ -61,7 +62,8 @@ class DeepcoinProcessor:
         try:
             self.monitoring = False 
             if action == "CLOSE":
-                self._close_all("接收到全平指令，撤单清仓")
+                # 🚀 对应你的快速反转保护 (6K线斩仓)
+                self._close_all("紧急斩仓：触发 V10.4 快速反转保护或极限风控！")
                 return
 
             if action in ["LONG", "SHORT"]:
@@ -70,15 +72,13 @@ class DeepcoinProcessor:
                 if balance <= 0 or curr_px <= 0: return
 
                 if tv_price > 0 and abs(curr_px - tv_price) > 5.0:
-                    dingtalk.report_system_alert("滑点拦截", f"偏差 {abs(curr_px - tv_price):.2f} U")
+                    dingtalk.report_system_alert("滑点拦截", f"偏差过大: 现价 {curr_px} vs TV {tv_price}")
                     return
 
-                # 🚀 V10.1 侦察兵：在清场前，记录旧仓位，用于战报连贯性感知
                 old_pos = self._get_active_position()
                 old_qty = int(old_pos['size']) if old_pos else 0
 
-                # 执行铁血清场
-                self._close_all(f"新兵入场 {action}")
+                self._close_all(f"新战局启动 {action}")
                 
                 target_qty = self._calculate_contracts(curr_px, balance)
                 if target_qty < 1: return 
@@ -100,7 +100,6 @@ class DeepcoinProcessor:
                 if pos and pos['size'] > 0:
                     self.current_side = action
                     self.initial_qty = pos['size']
-                    # 将旧仓数据传递给挂单监控，用于战报打印
                     self._protect_and_monitor(pos['size'], pos['entry_price'], old_qty)
         finally:
             self._lock.release()
@@ -119,7 +118,6 @@ class DeepcoinProcessor:
 
     def _protect_and_monitor(self, qty, entry_price, old_qty=0):
         tp1_px, tp2_px, tp3_px, sl_px = self._calc_tp_sl(entry_price)
-        
         close_side = "sell" if self.current_side == "LONG" else "buy"
         pos_side = "long" if self.current_side == "LONG" else "short"
         
@@ -127,7 +125,6 @@ class DeepcoinProcessor:
         qty2 = int(qty * self.tp_ratios[1])
         qty3 = int(qty - qty1 - qty2)
 
-        # 这里因为前面提权了杠杆和仓位，大概率能跨过 17U 门槛挂满了！
         if qty1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp1_px, qty1)
         if qty2 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp2_px, qty2)
         if qty3 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp3_px, qty3)
@@ -136,7 +133,6 @@ class DeepcoinProcessor:
         self.best_price = entry_price
         self.current_sl = sl_px
 
-        # 🚀 把 old_qty 传给钉钉
         dingtalk.report_deepcoin_open(self.current_side, entry_price, qty, [tp1_px, tp2_px, tp3_px], sl_px, self.current_atr, old_qty)
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
@@ -161,8 +157,18 @@ class DeepcoinProcessor:
                 if self.current_side == "LONG": self.best_price = max(self.best_price, curr_px)
                 else: self.best_price = min(self.best_price, curr_px)
 
-                trail_factor = self.trail_tight * (0.65 if self.current_adx > 25 else 0.95)
+                # 🚀 V10.4 完美复刻的三档追踪乘数引擎
+                if self.current_adx > 28:
+                    tf_multiplier = 0.55
+                elif self.current_adx > 20:
+                    tf_multiplier = 0.68
+                else:
+                    tf_multiplier = 0.90
+                    
+                trail_factor = self.trail_tight * tf_multiplier
                 trail_offset = self.current_atr * trail_factor * 0.45 
+                
+                # 保本确认：吃掉 TP1 后仓位必然变小
                 is_breakeven = actual_qty < (self.initial_qty * 0.8)
 
                 if is_breakeven:
@@ -171,7 +177,9 @@ class DeepcoinProcessor:
                     
                     if self.current_side == "LONG":
                         calculated_sl = round(self.best_price - trail_offset, 2)
+                        # 强力保本锁：决不允许新防线低于开仓均价！
                         new_sl = max(calculated_sl, self.watched_entry, self.current_sl)
+                        
                         if new_sl - self.current_sl > 2.0:
                             deepcoin_client.cancel_all_open_orders(self.symbol)
                             time.sleep(0.5)
@@ -179,11 +187,13 @@ class DeepcoinProcessor:
                             _, _, tp3_px, _ = self._calc_tp_sl(actual_entry)
                             deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp3_px, actual_qty)
                             deepcoin_client.place_conditional_order(self.symbol, close_side, pos_side, new_sl, actual_qty)
-                            dingtalk.report_intervention(actual_qty, actual_entry, tp3_px, new_sl, "🚀 追踪止盈：防线向前推进！")
+                            dingtalk.report_intervention(actual_qty, actual_entry, tp3_px, new_sl, "🚀 追踪止盈：防线向前推进，绝对保本！")
                             
                     else:
                         calculated_sl = round(self.best_price + trail_offset, 2)
+                        # 强力保本锁：决不允许新防线高于开仓均价！
                         new_sl = min(calculated_sl, self.watched_entry, self.current_sl)
+                        
                         if self.current_sl - new_sl > 2.0:
                             deepcoin_client.cancel_all_open_orders(self.symbol)
                             time.sleep(0.5)
@@ -191,7 +201,7 @@ class DeepcoinProcessor:
                             _, _, tp3_px, _ = self._calc_tp_sl(actual_entry)
                             deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp3_px, actual_qty)
                             deepcoin_client.place_conditional_order(self.symbol, close_side, pos_side, new_sl, actual_qty)
-                            dingtalk.report_intervention(actual_qty, actual_entry, tp3_px, new_sl, "🚀 追踪止盈：防线向下推进！")
+                            dingtalk.report_intervention(actual_qty, actual_entry, tp3_px, new_sl, "🚀 追踪止盈：防线向下推进，绝对保本！")
                 
                 elif abs(actual_qty - self.watched_qty) > 0.001 or abs(actual_entry - self.watched_entry) > 0.5:
                     deepcoin_client.cancel_all_open_orders(self.symbol)
@@ -220,19 +230,18 @@ class DeepcoinProcessor:
         return None
 
     def _close_all(self, reason: str):
-        # 🚀 幽灵单全域清理
         deepcoin_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.5)
         
-        # 🚀 V10.1 核心补丁：死循环强制平仓验证（不见兔子不撒鹰）
+        # 强制清仓死循环锁
         max_retries = 8
         for i in range(max_retries):
             deepcoin_client.close_all_positions(self.symbol)
-            time.sleep(0.8) # 等待深币撮合引擎消化
+            time.sleep(0.8) 
             pos = self._get_active_position()
             if not pos or pos.get('size', 0) == 0:
-                break # 仓位确认归零，成功跳出循环！
-            logger.warning(f"⚠️ 第 {i+1} 次平仓后，深币底仓仍未归零，继续轰炸！")
+                break 
+            logger.warning(f"⚠️ 第 {i+1} 次平仓后底仓仍未归零，继续轰炸！")
             
         self.monitoring = False
         if reason: dingtalk.report_deepcoin_clear(reason)
