@@ -30,7 +30,8 @@ class DeepcoinProcessor:
         self.current_trail_factor = 0.50 
         self.current_atr = 30.0
         
-        # 理论价格透传缓存
+        # 理论价格与状态透传缓存
+        self.regime = 3
         self.tv_price = 0.0
         self.tv_tp1 = 0.0
         self.tv_tp2 = 0.0
@@ -44,7 +45,7 @@ class DeepcoinProcessor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 深币 V10.29 完美上帝视角大脑加载完毕：全量接收 TV 理论数据与清盘死因！")
+        logger.info("🧠 深币 V10.38 完美上帝视角大脑加载完毕：全量接收 4档自适应数据！")
 
     def _calculate_contracts(self, curr_px, balance):
         return int((balance * self.margin_rate * self.leverage) / (curr_px * self.face_value))
@@ -52,7 +53,8 @@ class DeepcoinProcessor:
     def process_signal(self, payload: dict):
         action = payload.get("action", "").upper()
         
-        # 🚀 解析 TV 传来的全量参数
+        # 🚀 解析 TV 传来的全量自适应参数
+        self.regime = int(payload.get("regime", 3)) # 接收 4 档状态
         self.tv_price = float(payload.get("price", 0.0))
         self.current_atr = float(payload.get("atr", 30.0))
         self.tp1_mult = float(payload.get("tp1_m", 1.28))
@@ -71,7 +73,6 @@ class DeepcoinProcessor:
             
         try:
             self.monitoring = False 
-            # 🚀 V10.29 完美接收死因 (Reason)
             if action == "CLOSE":
                 reason = payload.get("reason", "TV 图表要求强制清仓")
                 self._close_all(f"TV 终极裁决: {reason}")
@@ -144,10 +145,11 @@ class DeepcoinProcessor:
         self.best_price = entry_price
         self.current_sl = sl_px
 
+        # 🚀 将 regime 档位传入钉钉
         dingtalk.report_deepcoin_open(
             self.current_side, entry_price, qty, 
             [tp1_px, tp2_px, tp3_px], sl_px, self.current_atr, old_qty,
-            self.tv_price, [self.tv_tp1, self.tv_tp2, self.tv_tp3], self.tv_sl
+            self.tv_price, [self.tv_tp1, self.tv_tp2, self.tv_tp3], self.tv_sl, self.regime
         )
         
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
@@ -174,7 +176,6 @@ class DeepcoinProcessor:
                 else: self.best_price = min(self.best_price, curr_px)
 
                 trail_offset = self.current_atr * self.current_trail_factor * 0.45 
-                # 适配 10/30/60
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
 
                 if is_breakeven:
