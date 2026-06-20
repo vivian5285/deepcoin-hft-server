@@ -20,7 +20,7 @@ class DeepcoinProcessor:
         self.leverage = 20
         self.face_value = 0.1
         
-        # 🚀 V10.29 核心修复：完美对齐 TV 的 10/30/60 网格切割比例
+        # 🚀 10/30/60 完美网格比例对齐
         self.tp_ratios = [0.10, 0.30, 0.60]
         
         self.tp1_mult = 1.28
@@ -30,7 +30,7 @@ class DeepcoinProcessor:
         self.current_trail_factor = 0.50 
         self.current_atr = 30.0
         
-        # V10.29 理论价格透传缓存
+        # 理论价格透传缓存
         self.tv_price = 0.0
         self.tv_tp1 = 0.0
         self.tv_tp2 = 0.0
@@ -44,7 +44,7 @@ class DeepcoinProcessor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 深币 V10.29 完美对齐大脑加载完毕：全量接收 TV 理论数据！")
+        logger.info("🧠 深币 V10.29 完美上帝视角大脑加载完毕：全量接收 TV 理论数据与清盘死因！")
 
     def _calculate_contracts(self, curr_px, balance):
         return int((balance * self.margin_rate * self.leverage) / (curr_px * self.face_value))
@@ -52,7 +52,7 @@ class DeepcoinProcessor:
     def process_signal(self, payload: dict):
         action = payload.get("action", "").upper()
         
-        # 🚀 V10.29 全域 JSON 解析 (囊括真实倍数与理论绝对价)
+        # 🚀 解析 TV 传来的全量参数
         self.tv_price = float(payload.get("price", 0.0))
         self.current_atr = float(payload.get("atr", 30.0))
         self.tp1_mult = float(payload.get("tp1_m", 1.28))
@@ -71,9 +71,10 @@ class DeepcoinProcessor:
             
         try:
             self.monitoring = False 
-            # 🚀 V10.29 最高指令：TV 下发 CLOSE，无条件全平清场
+            # 🚀 V10.29 完美接收死因 (Reason)
             if action == "CLOSE":
-                self._close_all("终极兜底防线：TV 图表已清仓，深币实盘强制对齐！")
+                reason = payload.get("reason", "TV 图表要求强制清仓")
+                self._close_all(f"TV 终极裁决: {reason}")
                 return
 
             if action in ["LONG", "SHORT"]:
@@ -110,7 +111,6 @@ class DeepcoinProcessor:
                 if pos and pos['size'] > 0:
                     self.current_side = action
                     self.initial_qty = pos['size']
-                    # 把实际抢到的均价传给排兵布阵函数
                     self._protect_and_monitor(pos['size'], pos['entry_price'], old_qty)
         finally:
             self._lock.release()
@@ -144,7 +144,6 @@ class DeepcoinProcessor:
         self.best_price = entry_price
         self.current_sl = sl_px
 
-        # 🚀 带着 TV 的理论绝对价格，去钉钉战报里“照妖镜”对比滑点
         dingtalk.report_deepcoin_open(
             self.current_side, entry_price, qty, 
             [tp1_px, tp2_px, tp3_px], sl_px, self.current_atr, old_qty,
@@ -175,7 +174,7 @@ class DeepcoinProcessor:
                 else: self.best_price = min(self.best_price, curr_px)
 
                 trail_offset = self.current_atr * self.current_trail_factor * 0.45 
-                # 🚀 适配 10/30/60：一旦前 10% 或 30% 被吃掉，防线立刻启动绝对保本
+                # 适配 10/30/60
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
 
                 if is_breakeven:
