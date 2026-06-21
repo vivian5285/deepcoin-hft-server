@@ -44,7 +44,7 @@ class DeepcoinProcessor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 深币 V10.38 完美上帝视角大脑加载完毕：全量接收 4档自适应数据！")
+        logger.info("🧠 深币 V10.38 灾备终极版大脑加载完毕：全量接收 4档自适应数据！")
 
     def _calculate_contracts(self, curr_px, balance):
         # 🚀 资管级动态仓位管理：根据 4 档 Regime 动态调拨军费
@@ -259,4 +259,30 @@ class DeepcoinProcessor:
         self.monitoring = False
         if reason: dingtalk.report_deepcoin_clear(reason)
 
+    def recover_state_on_startup(self):
+        """🚀 灾备系统：开机自动检测遗留阵地并唤醒雷达"""
+        try:
+            pos = self._get_active_position()
+            if pos and pos['size'] > 0:
+                actual_side = pos.get('posSide', '').upper()
+                if not actual_side: actual_side = "LONG"
+                
+                self.current_side = actual_side
+                self.initial_qty = pos['size']
+                self.watched_qty = self.initial_qty
+                self.watched_entry = pos['entry_price']
+                self.best_price = self.watched_entry
+                
+                self.current_atr = 30.0
+                self.regime = 3
+                self.monitoring = True
+                
+                logger.info(f"🔄 灾备自愈：系统重启！检测到遗留阵地 {self.current_side} {self.initial_qty} 张，哨兵雷达已强行接管！")
+                threading.Thread(target=self._sentinel_loop, daemon=True).start()
+            else:
+                logger.info("🔄 灾备自愈：系统重启。当前空仓，雷达待命。")
+        except Exception as e:
+            logger.error(f"灾备恢复失败: {e}")
+
 deepcoin_processor = DeepcoinProcessor()
+deepcoin_processor.recover_state_on_startup() # 👈 开机自检自愈执行点
