@@ -16,7 +16,6 @@ class DeepcoinProcessor:
         self.monitoring = False
         self._lock = threading.Lock()
         
-        self.margin_rate = 0.50 
         self.leverage = 20
         self.face_value = 0.1
         
@@ -48,13 +47,24 @@ class DeepcoinProcessor:
         logger.info("🧠 深币 V10.38 完美上帝视角大脑加载完毕：全量接收 4档自适应数据！")
 
     def _calculate_contracts(self, curr_px, balance):
-        return int((balance * self.margin_rate * self.leverage) / (curr_px * self.face_value))
+        # 🚀 资管级动态仓位管理：根据 4 档 Regime 动态调拨军费
+        if self.regime == 1:
+            dynamic_margin = 0.15  # 🧊 极弱：15% 仓位试探
+        elif self.regime == 2:
+            dynamic_margin = 0.25  # 🚶 弱势：25% 基础阵地
+        elif self.regime == 3:
+            dynamic_margin = 0.35  # 🏃 中势：35% 标准突击
+        else:
+            dynamic_margin = 0.50  # 🚀 强势：50% 满载出击 (上限)
+            
+        logger.info(f"💰 触发档位 {self.regime}，系统自动调拨 {dynamic_margin*100}% 资金执行 20 倍杠杆！")
+        return int((balance * dynamic_margin * self.leverage) / (curr_px * self.face_value))
 
     def process_signal(self, payload: dict):
         action = payload.get("action", "").upper()
         
         # 🚀 解析 TV 传来的全量自适应参数
-        self.regime = int(payload.get("regime", 3)) # 接收 4 档状态
+        self.regime = int(payload.get("regime", 3))
         self.tv_price = float(payload.get("price", 0.0))
         self.current_atr = float(payload.get("atr", 30.0))
         self.tp1_mult = float(payload.get("tp1_m", 1.28))
@@ -145,7 +155,6 @@ class DeepcoinProcessor:
         self.best_price = entry_price
         self.current_sl = sl_px
 
-        # 🚀 将 regime 档位传入钉钉
         dingtalk.report_deepcoin_open(
             self.current_side, entry_price, qty, 
             [tp1_px, tp2_px, tp3_px], sl_px, self.current_atr, old_qty,
