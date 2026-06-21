@@ -20,8 +20,8 @@ class DeepcoinProcessor:
         self.leverage = 20
         self.face_value = 0.1
         
-        # 🚀 10/30/60 完美网格比例对齐
-        self.tp_ratios = [0.10, 0.30, 0.60]
+        # 🚀 适配全新打分引擎：33/33/34 均匀三等分网格
+        self.tp_ratios = [0.33, 0.33, 0.34]
         
         self.tp1_mult = 1.28
         self.tp2_mult = 2.45
@@ -45,7 +45,7 @@ class DeepcoinProcessor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 深币 V10.38 完美上帝视角大脑加载完毕：全量接收 4档自适应数据！")
+        logger.info("🧠 深币 [极速打分版] 大脑加载完毕：已切换为 33/33/34 三等分网格！")
 
     def _calculate_contracts(self, curr_px, balance):
         return int((balance * self.margin_rate * self.leverage) / (curr_px * self.face_value))
@@ -176,7 +176,9 @@ class DeepcoinProcessor:
                 else: self.best_price = min(self.best_price, curr_px)
 
                 trail_offset = self.current_atr * self.current_trail_factor * 0.45 
-                is_breakeven = actual_qty < (self.initial_qty * 0.95)
+                
+                # 🚀 适配 33% 首仓止盈：只要仓位缩水至初始的 75% 以下，视为 TP1 已吃掉，立刻拉起保本！
+                is_breakeven = actual_qty < (self.initial_qty * 0.75)
 
                 if is_breakeven:
                     close_side = "sell" if self.current_side == "LONG" else "buy"
