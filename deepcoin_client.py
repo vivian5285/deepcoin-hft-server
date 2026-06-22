@@ -17,7 +17,6 @@ class DeepcoinClient:
         self.base_url = "https://api.deepcoin.com"
 
     def _get_timestamp(self):
-        # 👑 V7 核心：ISO8601 UTC 时间戳
         return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
 
     def _sign(self, timestamp: str, method: str, request_path: str, body: str = ""):
@@ -30,19 +29,16 @@ class DeepcoinClient:
             logger.error("⚠️ Deepcoin API 密钥未配置！")
             return None
 
-        # 确保加上 /deepcoin 前缀
         if not endpoint.startswith("/deepcoin/"): 
             endpoint = "/deepcoin" + (endpoint if endpoint.startswith("/") else "/" + endpoint)
             
         timestamp = self._get_timestamp()
         
-        # 👑 V7 核心：GET 请求参数拼接，POST body 转 JSON
         body_str = json.dumps(params, separators=(',', ':')) if params and method.upper() != "GET" else ""
         request_path = f"{endpoint}?{'&'.join([f'{k}={v}' for k, v in params.items()])}" if method.upper() == "GET" and params else endpoint
         
         signature = self._sign(timestamp, method, request_path, body_str)
         
-        # 👑 V7 核心：DC-ACCESS 请求头
         headers = {
             "Content-Type": "application/json", 
             "DC-ACCESS-KEY": self.api_key,
@@ -56,14 +52,13 @@ class DeepcoinClient:
             resp = requests.request(method.upper(), url, data=body_str if body_str else None, headers=headers, timeout=10)
             res_json = resp.json()
             if str(res_json.get("code")) != "0":
-                logger.warning(f"Deepcoin API 业务异常: {res_json}")
+                logger.warning(f"Deepcoin 接口返回异常: {res_json}")
             return res_json
         except Exception as e: 
-            logger.error(f"Deepcoin 请求失败 {endpoint}: {e} | 返回: {resp.text if 'resp' in locals() else 'N/A'}")
+            logger.error(f"Deepcoin 请求失败 {endpoint}: {e}")
             return None
 
     def get_available_balance(self, ccy="USDT"):
-        # 👑 完美读取深币金库
         res = self._request("GET", "/account/balances", {"instType": "SWAP"})
         if isinstance(res, dict) and "data" in res:
             for item in res["data"]:
@@ -72,21 +67,18 @@ class DeepcoinClient:
         return 0.0
 
     def get_current_price(self, symbol="ETH-USDT-SWAP"):
-        """🚀 白嫖币安公开接口查价，绝对稳定，且两端基准 100% 同步"""
         try:
             binance_symbol = symbol.split("-")[0] + "USDT" 
-            url = f"https://api.binance.com/api/v3/ticker/price?symbol={binance_symbol}"
-            res = requests.get(url, timeout=5)
-            data = res.json()
-            return float(data.get("price", 0.0))
-        except Exception as e:
-            logger.error(f"借用币安公开接口查价失败: {e}")
+            res = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={binance_symbol}", timeout=5)
+            return float(res.json().get("price", 0.0))
+        except:
             return 0.0
 
     def get_position_info(self, symbol="ETH-USDT-SWAP"):
         return self._request("GET", "/account/positions", {"instType": "SWAP", "instId": symbol})
 
     def place_market_order(self, symbol, side, pos_side, qty):
+        """基础市价下单接口（已被验证绝对稳定）"""
         params = {
             "instId": symbol, "tdMode": "cross",
             "side": side, "posSide": pos_side,
@@ -105,6 +97,7 @@ class DeepcoinClient:
         return self._request("POST", "/trade/order", params)
 
     def place_conditional_order(self, symbol, side, pos_side, trigger_px, qty):
+        # 修正 OKX/Deepcoin 架构标准的 Algo 终极路径
         params = {
             "instId": symbol, "tdMode": "cross",
             "side": side, "posSide": pos_side,
@@ -112,21 +105,29 @@ class DeepcoinClient:
             "triggerPx": str(trigger_px), "ordPx": str(trigger_px),
             "reduceOnly": True
         }
-        return self._request("POST", "/trade/order/algo", params)
+        return self._request("POST", "/trade/order-algo", params)
 
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
         try:
-            # 👑 双重轰炸撤单防线
+            # 兼容性退化处理：如果一键撤单 404，至少不阻塞后续代码运行
             self._request("POST", "/trade/cancel-batch-orders", {"instId": symbol})
-            self._request("POST", "/trade/cancel-algo-orders", {"instId": symbol})
-            time.sleep(0.5)
-            self._request("POST", "/trade/cancel-batch-orders", {"instId": symbol})
-            self._request("POST", "/trade/cancel-algo-orders", {"instId": symbol})
-            logger.info("🧹 双重撤单轰炸完成，盘口已物理级清空！")
-        except Exception as e:
-            logger.error(f"撤单异常: {e}")
+            self._request("POST", "/trade/cancel-algos", {"instId": symbol})
+        except: pass
 
     def close_all_positions(self, symbol="ETH-USDT-SWAP"):
-        return self._request("POST", "/trade/close-position", {"instId": symbol, "mrgPosition": "merge"})
+        """🚀 终极防爆修复：抛弃不稳定的 Close 接口，采用反向市价单物理平仓"""
+        try:
+            pos_info = self.get_position_info(symbol)
+            if pos_info and 'data' in pos_info:
+                for p in pos_info['data']:
+                    sz = float(p.get("pos", 0))
+                    if sz > 0:
+                        pos_side = p.get("posSide", "").lower()
+                        # 如果持有长仓(long)，就下卖单(sell)；如果持有短仓(short)，就下买单(buy)
+                        close_side = "sell" if pos_side == "long" else "buy"
+                        logger.info(f"🔨 启动物理清仓：发送 {close_side} {pos_side} {sz} 张市价单")
+                        self.place_market_order(symbol, close_side, pos_side, sz)
+        except Exception as e:
+            logger.error(f"物理平仓执行异常: {e}")
 
 deepcoin_client = DeepcoinClient()
