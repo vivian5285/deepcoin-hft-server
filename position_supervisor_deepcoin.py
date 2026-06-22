@@ -50,10 +50,10 @@ class DeepcoinProcessor:
 
         # ==================== 移动保本止损自适应触发比例 ====================
         self.breakeven_ratios = {
-            1: 0.70,   # 极弱 - 最保守
-            2: 0.65,   # 弱势
-            3: 0.60,   # 中势（默认）
-            4: 0.55    # 强势 - 相对积极
+            1: 0.70,
+            2: 0.65,
+            3: 0.60,
+            4: 0.55
         }
 
         logger.info("🧠 深币 V10.41 最终呼吸空间版大脑加载完毕（已优化关闭逻辑 + 分批止盈保护）")
@@ -114,7 +114,7 @@ class DeepcoinProcessor:
                     dingtalk.report_system_alert("防追高拦截", f"偏差过大: 现价 {curr_px} vs TV {self.tv_price}")
                     return
 
-                # ==================== 新信号到达：先强制清理旧仓位 ====================
+                # 新信号到达：强制清理旧仓位
                 self._close_all("新信号到达，强制清理旧仓位与挂单")
                 time.sleep(0.8)
 
@@ -185,7 +185,7 @@ class DeepcoinProcessor:
         close_side = "sell" if self.current_side == "LONG" else "buy"
         pos_side = "long" if self.current_side == "LONG" else "short"
         
-        # ==================== 安全的分批止盈数量计算（防止不满1张） ====================
+        # ==================== 安全的分批止盈数量计算 ====================
         raw_qty1 = qty * self.tp_ratios[0]
         raw_qty2 = qty * self.tp_ratios[1]
         raw_qty3 = qty - raw_qty1 - raw_qty2
@@ -194,7 +194,6 @@ class DeepcoinProcessor:
         qty2 = max(1, int(raw_qty2)) if raw_qty2 >= 1 else 0
         qty3 = max(1, int(raw_qty3)) if raw_qty3 >= 1 else 0
 
-        # 小数量合并逻辑
         if qty1 == 0 and qty2 > 0: qty2 += 1
         if qty2 == 0 and qty3 > 0: qty3 += 1
 
@@ -207,12 +206,25 @@ class DeepcoinProcessor:
         self.best_price = entry_price
         self.current_sl = entry_price
 
+        # ==================== 更新后的钉钉报告调用 ====================
         dingtalk.report_deepcoin_open(
-            self.current_side, entry_price, qty, 
-            [tp1_px, tp2_px, tp3_px], self.current_sl, self.current_atr, old_qty,
-            self.tv_price, [self.tv_tp1, self.tv_tp2, self.tv_tp3], self.tv_sl, self.regime
+            side=self.current_side,
+            entry_price=entry_price,
+            qty=qty,
+            tp_prices=[tp1_px, tp2_px, tp3_px],
+            sl_price=self.current_sl,
+            atr=self.current_atr,
+            old_qty=old_qty,
+            tv_price=self.tv_price,
+            tv_tp_prices=[self.tv_tp1, self.tv_tp2, self.tv_tp3],
+            tv_sl_price=self.tv_sl,
+            regime=self.regime
         )
-        self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
+
+        self.watched_qty = qty
+        self.watched_entry = entry_price
+        self.initial_qty = qty
+        self.monitoring = True
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
     def _sentinel_loop(self):
@@ -240,7 +252,6 @@ class DeepcoinProcessor:
                 trail_offset = self.current_atr * self.current_trail_factor * 0.45 
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
 
-                # ==================== regime 自适应移动保本触发 ====================
                 activation_ratio = self.breakeven_ratios.get(self.regime, 0.60)
                 has_moved_favorably = False
                 
@@ -305,11 +316,6 @@ class DeepcoinProcessor:
         return None
 
     def _close_all(self, reason: str):
-        """
-        Deepcoin 单向持仓最可靠的平仓方式：
-        1. 先用等量反向市价单直接平掉仓位
-        2. 再兜底撤掉所有残留挂单
-        """
         try:
             pos = self._get_active_position()
             if pos and pos.get('size', 0) > 0:
@@ -321,11 +327,9 @@ class DeepcoinProcessor:
                 deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty)
                 time.sleep(0.8)
 
-            # 兜底撤单
             deepcoin_client.cancel_all_open_orders(self.symbol)
             time.sleep(0.5)
 
-            # 最终状态确认
             final_pos = self._get_active_position()
             if final_pos and final_pos.get('size', 0) > 0:
                 logger.warning(f"⚠️ 平仓后仍残留仓位: {final_pos['size']}")
