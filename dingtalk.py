@@ -43,31 +43,45 @@ def get_regime_name(regime_code):
     if regime_code == 4: return "🚀 强势单边 (50% 满载出击)"
     return "未知状态"
 
-# ==================== 深币开仓战报 ====================
-def report_deepcoin_open(side, price, qty, tp_pxs, sl_px, atr, old_qty=0, tv_price=0, tv_tp_pxs=None, tv_sl_px=0, regime=3):
+# ==================== 深币开仓战报（已更新） ====================
+def report_deepcoin_open(side, entry_price, qty, tp_prices, sl_price, atr, old_qty=0,
+                         tv_price=0, tv_tp_prices=None, tv_sl_price=0, regime=3):
     emoji = "🟩" if side == "LONG" else "🟥"
     clean_msg = "✅ 纯净新开 (旧仓已归零)" if old_qty == 0 else f"🚨 战阵反转 (强平旧仓 {old_qty} 张)"
-    slip_txt = f"{price - tv_price:+.2f} 刀" if side == "LONG" and tv_price>0 else (f"{tv_price - price:+.2f} 刀" if tv_price>0 else "未知")
-    tv_tp_str = f"`{tv_tp_pxs[0]:.2f}` | `{tv_tp_pxs[1]:.2f}` | `{tv_tp_pxs[2]:.2f}`" if (tv_tp_pxs and tv_tp_pxs[0] > 0) else "未提供"
 
-    # 优化文案：明确当前已移除初始硬止损
-    stop_info = f"**`{sl_px:.2f}`**（初始无硬止损，由TV反转保护 + regime自适应保本守护）"
+    # 滑点计算
+    if tv_price > 0:
+        slip = entry_price - tv_price if side == "LONG" else tv_price - entry_price
+        slip_txt = f"{slip:+.2f} 刀"
+    else:
+        slip_txt = "未知"
+
+    # TV 理论止盈止损展示
+    if tv_tp_prices and len(tv_tp_prices) >= 3 and tv_tp_prices[0] > 0:
+        tv_tp_str = f"`{tv_tp_prices[0]:.2f}` | `{tv_tp_prices[1]:.2f}` | `{tv_tp_prices[2]:.2f}`"
+    else:
+        tv_tp_str = "未提供"
+
+    tv_sl_str = f"`{tv_sl_price:.2f}`" if tv_sl_price > 0 else "未提供"
+
+    # 止损策略说明（强调已移除初始硬止损）
+    stop_info = f"**`{sl_price:.2f}`**（初始无硬止损，由 TV 反转保护 + regime 自适应保本守护）"
 
     send_alert("⚔️ 深币现价吃单 (V10.41 呼吸空间版)", {
         "防守方向": f"**{emoji} {side}**",
-        "市场与资金": f"**{get_regime_name(regime)}**", 
-        "实盘均价": f"**`{price:.2f}`** USDT (滑点: **{slip_txt}**)",
+        "市场与资金": f"**{get_regime_name(regime)}**",
+        "实盘均价": f"**`{entry_price:.2f}`** USDT (滑点: **{slip_txt}**)",
         "动态头寸": f"`{qty}` 张 (10/30/60 切分)",
         "状态反馈": f"**{clean_msg}**",
         "止盈 (TV 理论)": tv_tp_str,
-        "止盈 (实盘排队)": f"`{tp_pxs[0]:.2f}` | `{tp_pxs[1]:.2f}` | `{tp_pxs[2]:.2f}`",
+        "止盈 (实盘排队)": f"`{tp_prices[0]:.2f}` | `{tp_prices[1]:.2f}` | `{tp_prices[2]:.2f}`",
         "止损策略": stop_info
     })
 
-# ==================== 币安开仓战报 ====================
+# ==================== 币安开仓战报（保持风格一致） ====================
 def report_supervisor_open(side, price, qty, tp_pxs, sl_px, atr, tv_price=0, tv_tp_pxs=None, tv_sl_px=0, regime=3):
     emoji = "🟩" if side == "LONG" else "🟥"
-    slip_txt = f"{price - tv_price:+.2f} 刀" if side == "LONG" and tv_price>0 else (f"{tv_price - price:+.2f} 刀" if tv_price>0 else "未知")
+    slip_txt = f"{price - tv_price:+.2f} 刀" if side == "LONG" and tv_price > 0 else (f"{tv_price - price:+.2f} 刀" if tv_price > 0 else "未知")
     tv_tp_str = f"`{tv_tp_pxs[0]:.2f}` | `{tv_tp_pxs[1]:.2f}` | `{tv_tp_pxs[2]:.2f}`" if (tv_tp_pxs and tv_tp_pxs[0] > 0) else "未提供"
 
     stop_info = f"**`{sl_px:.2f}`**（初始无硬止损，由TV反转保护 + regime自适应保本守护）" if sl_px == price else f"**`{sl_px:.2f}`**"
