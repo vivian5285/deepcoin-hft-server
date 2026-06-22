@@ -56,7 +56,7 @@ class DeepcoinProcessor:
             4: 0.55    # 强势 - 相对积极
         }
 
-        logger.info("🧠 深币 V10.41 最终呼吸空间版大脑加载完毕：硬止损已移除，regime自适应保本已启用！")
+        logger.info("🧠 深币 V10.41 最终呼吸空间版大脑加载完毕（已优化关闭逻辑 + 分批止盈保护）")
 
     def _get_or_update_daily_baseline(self, current_balance):
         today = datetime.utcnow().strftime('%Y-%m-%d')
@@ -114,9 +114,7 @@ class DeepcoinProcessor:
                     dingtalk.report_system_alert("防追高拦截", f"偏差过大: 现价 {curr_px} vs TV {self.tv_price}")
                     return
 
-                # 🔄 无论同向还是反向，永远先撤单 + 全平
-                deepcoin_client.cancel_all_open_orders(self.symbol)
-                time.sleep(0.6)
+                # ==================== 新信号到达：先强制清理旧仓位 ====================
                 self._close_all("新信号到达，强制清理旧仓位与挂单")
                 time.sleep(0.8)
 
@@ -187,17 +185,27 @@ class DeepcoinProcessor:
         close_side = "sell" if self.current_side == "LONG" else "buy"
         pos_side = "long" if self.current_side == "LONG" else "short"
         
-        qty1 = int(qty * self.tp_ratios[0])
-        qty2 = int(qty * self.tp_ratios[1])
-        qty3 = int(qty - qty1 - qty2)
+        # ==================== 安全的分批止盈数量计算（防止不满1张） ====================
+        raw_qty1 = qty * self.tp_ratios[0]
+        raw_qty2 = qty * self.tp_ratios[1]
+        raw_qty3 = qty - raw_qty1 - raw_qty2
 
-        # 注意：已完全移除初始硬止损（place_conditional_order）
+        qty1 = max(1, int(raw_qty1)) if raw_qty1 >= 1 else 0
+        qty2 = max(1, int(raw_qty2)) if raw_qty2 >= 1 else 0
+        qty3 = max(1, int(raw_qty3)) if raw_qty3 >= 1 else 0
+
+        # 小数量合并逻辑
+        if qty1 == 0 and qty2 > 0: qty2 += 1
+        if qty2 == 0 and qty3 > 0: qty3 += 1
+
+        logger.info(f"📊 分批止盈数量: TP1={qty1}, TP2={qty2}, TP3={qty3} (原始仓位={qty})")
+
         if qty1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp1_px, qty1)
         if qty2 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp2_px, qty2)
         if qty3 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp3_px, qty3)
         
         self.best_price = entry_price
-        self.current_sl = entry_price   # 初始不设置硬止损
+        self.current_sl = entry_price
 
         dingtalk.report_deepcoin_open(
             self.current_side, entry_price, qty, 
@@ -212,7 +220,9 @@ class DeepcoinProcessor:
             try:
                 pos = self._get_active_position()
                 actual_qty = int(pos['size']) if pos else 0
-                if actual_qty == 0: self._close_all("空仓清场"); break
+                if actual_qty == 0: 
+                    self._close_all("空仓清场")
+                    break
                     
                 actual_entry = pos['entry_price']
                 actual_side = pos.get('posSide', '').upper()
@@ -295,16 +305,44 @@ class DeepcoinProcessor:
         return None
 
     def _close_all(self, reason: str):
-        deepcoin_client.cancel_all_open_orders(self.symbol)
-        time.sleep(0.5)
-        for i in range(8):
-            deepcoin_client.close_all_positions(self.symbol)
-            time.sleep(0.8) 
+        """
+        Deepcoin 单向持仓最可靠的平仓方式：
+        1. 先用等量反向市价单直接平掉仓位
+        2. 再兜底撤掉所有残留挂单
+        """
+        try:
             pos = self._get_active_position()
-            if not pos or pos.get('size', 0) == 0:
-                break 
+            if pos and pos.get('size', 0) > 0:
+                qty = int(pos['size'])
+                close_side = "sell" if self.current_side == "LONG" else "buy"
+                pos_side = "long" if self.current_side == "LONG" else "short"
+
+                logger.info(f"🔨 使用反向市价单强制平仓: {close_side} {qty} 张")
+                deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty)
+                time.sleep(0.8)
+
+            # 兜底撤单
+            deepcoin_client.cancel_all_open_orders(self.symbol)
+            time.sleep(0.5)
+
+            # 最终状态确认
+            final_pos = self._get_active_position()
+            if final_pos and final_pos.get('size', 0) > 0:
+                logger.warning(f"⚠️ 平仓后仍残留仓位: {final_pos['size']}")
+            else:
+                logger.info("✅ 仓位已完全清理")
+
+        except Exception as e:
+            logger.error(f"_close_all 执行异常: {e}")
+
         self.monitoring = False
-        if reason: dingtalk.report_deepcoin_clear(reason)
+        self.current_side = None
+        self.watched_qty = 0
+        self.watched_entry = 0
+        self.initial_qty = 0
+
+        if reason:
+            dingtalk.report_deepcoin_clear(reason)
 
     def recover_state_on_startup(self):
         try:
