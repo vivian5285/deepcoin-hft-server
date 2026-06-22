@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import logging, time, threading, os
+import logging, time, threading, os, json
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from deepcoin_client import deepcoin_client
 import dingtalk
@@ -18,8 +19,6 @@ class DeepcoinProcessor:
         
         self.leverage = 20
         self.face_value = 0.1
-        
-        # 🚀 10/30/60 完美网格比例对齐
         self.tp_ratios = [0.10, 0.30, 0.60]
         
         self.tp1_mult = 1.28
@@ -29,7 +28,6 @@ class DeepcoinProcessor:
         self.current_trail_factor = 0.50 
         self.current_atr = 30.0
         
-        # 理论价格与状态透传缓存
         self.regime = 3
         self.tv_price = 0.0
         self.tv_tp1 = 0.0
@@ -44,26 +42,41 @@ class DeepcoinProcessor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        logger.info("🧠 深币 V10.38 灾备终极版大脑加载完毕：全量接收 4档自适应数据！")
+        # 🛡️ 每日熔断护甲参数
+        self.daily_start_date = ""
+        self.daily_start_balance = 0.0
+        self.cb_level1_pct = -5.0  # 🟡 亏损 5% 军费减半
+        self.cb_level2_pct = -10.0 # 🔴 亏损 10% 彻底熔断
 
-    def _calculate_contracts(self, curr_px, balance):
-        # 🚀 资管级动态仓位管理：根据 4 档 Regime 动态调拨军费
-        if self.regime == 1:
-            dynamic_margin = 0.15  # 🧊 极弱：15% 仓位试探
-        elif self.regime == 2:
-            dynamic_margin = 0.25  # 🚶 弱势：25% 基础阵地
-        elif self.regime == 3:
-            dynamic_margin = 0.35  # 🏃 中势：35% 标准突击
-        else:
-            dynamic_margin = 0.50  # 🚀 强势：50% 满载出击 (上限)
+        logger.info("🧠 深币 V10.38 物理熔断版大脑加载完毕：双重风险护甲已激活！")
+
+    def _get_or_update_daily_baseline(self, current_balance):
+        today = datetime.utcnow().strftime('%Y-%m-%d')
+        tracker_file = 'deepcoin_risk_tracker.json'
+        
+        if self.daily_start_date != today:
+            try:
+                if os.path.exists(tracker_file):
+                    with open(tracker_file, 'r') as f:
+                        data = json.load(f)
+                        if data.get('date') == today:
+                            self.daily_start_date = today
+                            self.daily_start_balance = float(data.get('balance'))
+                            return self.daily_start_balance
+            except Exception: pass
+                
+            self.daily_start_date = today
+            self.daily_start_balance = current_balance
+            try:
+                with open(tracker_file, 'w') as f:
+                    json.dump({'date': today, 'balance': current_balance}, f)
+            except Exception: pass
+            logger.info(f"📅 新的交易日 ({today}) 开启，重置深币本金基线: {current_balance:.2f} USDT")
             
-        logger.info(f"💰 触发档位 {self.regime}，系统自动调拨 {dynamic_margin*100}% 资金执行 20 倍杠杆！")
-        return int((balance * dynamic_margin * self.leverage) / (curr_px * self.face_value))
+        return self.daily_start_balance
 
     def process_signal(self, payload: dict):
         action = payload.get("action", "").upper()
-        
-        # 🚀 解析 TV 传来的全量自适应参数
         self.regime = int(payload.get("regime", 3))
         self.tv_price = float(payload.get("price", 0.0))
         self.current_atr = float(payload.get("atr", 30.0))
@@ -72,7 +85,6 @@ class DeepcoinProcessor:
         self.tp3_mult = float(payload.get("tp3_m", 3.45))
         self.sl_mult  = float(payload.get("sl_m", 1.03)) 
         self.current_trail_factor = float(payload.get("trail_factor", 0.50)) 
-        
         self.tv_tp1 = float(payload.get("tv_tp1", 0.0))
         self.tv_tp2 = float(payload.get("tv_tp2", 0.0))
         self.tv_tp3 = float(payload.get("tv_tp3", 0.0))
@@ -90,9 +102,6 @@ class DeepcoinProcessor:
 
             if action in ["LONG", "SHORT"]:
                 curr_px = deepcoin_client.get_current_price(self.symbol)
-                balance = deepcoin_client.get_available_balance()
-                if balance <= 0 or curr_px <= 0: return
-
                 if self.tv_price > 0 and abs(curr_px - self.tv_price) > 5.0:
                     dingtalk.report_system_alert("防追高拦截", f"偏差过大: 现价 {curr_px} vs TV {self.tv_price}")
                     return
@@ -102,9 +111,35 @@ class DeepcoinProcessor:
 
                 self._close_all(f"新战局启动 {action}")
                 
-                target_qty = self._calculate_contracts(curr_px, balance)
+                # 🛡️ 必须在平仓后获取干净余额进行基线对比
+                balance = deepcoin_client.get_available_balance()
+                baseline = self._get_or_update_daily_baseline(balance)
+                
+                daily_pnl_pct = (balance - baseline) / baseline * 100 if baseline > 0 else 0
+                
+                # 🔴 第二道护甲：绝对熔断
+                if daily_pnl_pct <= self.cb_level2_pct:
+                    msg = f"今日真实亏损已达 {daily_pnl_pct:.2f}%，触发【🔴 绝对熔断】！系统物理锁死，今日拒绝开新仓！"
+                    logger.warning(msg)
+                    dingtalk.report_system_alert("🔴 账户物理熔断", msg)
+                    return
+                
+                if self.regime == 1: dynamic_margin = 0.15
+                elif self.regime == 2: dynamic_margin = 0.25
+                elif self.regime == 3: dynamic_margin = 0.35
+                else: dynamic_margin = 0.50
+                
+                # 🟡 第一道护甲：风险降级
+                if daily_pnl_pct <= self.cb_level1_pct:
+                    dynamic_margin *= 0.5
+                    msg = f"今日亏损达 {daily_pnl_pct:.2f}%，触发【🟡 风险降级护甲】，本次开仓军费强制减半至 {dynamic_margin*100}%"
+                    logger.warning(msg)
+                    dingtalk.report_system_alert("🟡 仓位降级护甲", msg)
+                
+                target_qty = int((balance * dynamic_margin * self.leverage) / (curr_px * self.face_value))
                 if target_qty < 1: return 
                 
+                logger.info(f"💰 触发档位 {self.regime}，系统最终调拨资金执行 20 倍杠杆！")
                 open_side = "buy" if action == "LONG" else "sell"
                 open_pos_side = "long" if action == "LONG" else "short"
 
@@ -160,7 +195,6 @@ class DeepcoinProcessor:
             [tp1_px, tp2_px, tp3_px], sl_px, self.current_atr, old_qty,
             self.tv_price, [self.tv_tp1, self.tv_tp2, self.tv_tp3], self.tv_sl, self.regime
         )
-        
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
@@ -194,7 +228,6 @@ class DeepcoinProcessor:
                     if self.current_side == "LONG":
                         calculated_sl = round(self.best_price - trail_offset, 2)
                         new_sl = max(calculated_sl, self.watched_entry, self.current_sl)
-                        
                         if new_sl - self.current_sl > 2.0:
                             deepcoin_client.cancel_all_open_orders(self.symbol)
                             time.sleep(0.5)
@@ -202,12 +235,10 @@ class DeepcoinProcessor:
                             _, _, tp3_px, _ = self._calc_tp_sl(actual_entry)
                             deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp3_px, actual_qty)
                             deepcoin_client.place_conditional_order(self.symbol, close_side, pos_side, new_sl, actual_qty)
-                            dingtalk.report_intervention(actual_qty, actual_entry, tp3_px, new_sl, "🚀 追踪止盈：防线向前推进，绝对保本！")
-                            
+                            dingtalk.report_intervention(actual_qty, actual_entry, tp3_px, new_sl, "🚀 追踪止盈：绝对保本！")
                     else:
                         calculated_sl = round(self.best_price + trail_offset, 2)
                         new_sl = min(calculated_sl, self.watched_entry, self.current_sl)
-                        
                         if self.current_sl - new_sl > 2.0:
                             deepcoin_client.cancel_all_open_orders(self.symbol)
                             time.sleep(0.5)
@@ -215,7 +246,7 @@ class DeepcoinProcessor:
                             _, _, tp3_px, _ = self._calc_tp_sl(actual_entry)
                             deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp3_px, actual_qty)
                             deepcoin_client.place_conditional_order(self.symbol, close_side, pos_side, new_sl, actual_qty)
-                            dingtalk.report_intervention(actual_qty, actual_entry, tp3_px, new_sl, "🚀 追踪止盈：防线向下推进，绝对保本！")
+                            dingtalk.report_intervention(actual_qty, actual_entry, tp3_px, new_sl, "🚀 追踪止盈：绝对保本！")
                 
                 elif abs(actual_qty - self.watched_qty) > 0.001 or abs(actual_entry - self.watched_entry) > 0.5:
                     deepcoin_client.cancel_all_open_orders(self.symbol)
@@ -246,43 +277,33 @@ class DeepcoinProcessor:
     def _close_all(self, reason: str):
         deepcoin_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.5)
-        
-        max_retries = 8
-        for i in range(max_retries):
+        for i in range(8):
             deepcoin_client.close_all_positions(self.symbol)
             time.sleep(0.8) 
             pos = self._get_active_position()
             if not pos or pos.get('size', 0) == 0:
                 break 
-            logger.warning(f"⚠️ 第 {i+1} 次平仓后底仓仍未归零，继续轰炸！")
-            
         self.monitoring = False
         if reason: dingtalk.report_deepcoin_clear(reason)
 
     def recover_state_on_startup(self):
-        """🚀 灾备系统：开机自动检测遗留阵地并唤醒雷达"""
         try:
             pos = self._get_active_position()
             if pos and pos['size'] > 0:
                 actual_side = pos.get('posSide', '').upper()
                 if not actual_side: actual_side = "LONG"
-                
                 self.current_side = actual_side
                 self.initial_qty = pos['size']
                 self.watched_qty = self.initial_qty
                 self.watched_entry = pos['entry_price']
                 self.best_price = self.watched_entry
-                
                 self.current_atr = 30.0
                 self.regime = 3
                 self.monitoring = True
-                
-                logger.info(f"🔄 灾备自愈：系统重启！检测到遗留阵地 {self.current_side} {self.initial_qty} 张，哨兵雷达已强行接管！")
+                logger.info(f"🔄 灾备自愈：系统重启！哨兵雷达已强行接管！")
                 threading.Thread(target=self._sentinel_loop, daemon=True).start()
-            else:
-                logger.info("🔄 灾备自愈：系统重启。当前空仓，雷达待命。")
         except Exception as e:
             logger.error(f"灾备恢复失败: {e}")
 
 deepcoin_processor = DeepcoinProcessor()
-deepcoin_processor.recover_state_on_startup() # 👈 开机自检自愈执行点
+deepcoin_processor.recover_state_on_startup()
