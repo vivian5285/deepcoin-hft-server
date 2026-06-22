@@ -42,32 +42,19 @@ class DeepcoinProcessor:
         self.best_price = 0.0
         self.current_sl = 0.0
 
-        # 🛡️ 每日熔断护甲参数
         self.daily_start_date = ""
         self.daily_start_balance = 0.0
         self.cb_level1_pct = -5.0
         self.cb_level2_pct = -10.0
 
-        # ==================== 移动保本止损自适应触发比例 ====================
-        self.breakeven_ratios = {
-            1: 0.70,
-            2: 0.65,
-            3: 0.60,
-            4: 0.55
-        }
+        self.breakeven_ratios = {1: 0.70, 2: 0.65, 3: 0.60, 4: 0.55}
 
-        logger.info("🧠 深币 V10.41 最终呼吸空间版大脑加载完毕（已优化小仓位 TP1 保障逻辑）")
+        logger.info("🧠 深币 V10.41 最终呼吸空间版大脑加载完毕（已优化撤单与平仓逻辑）")
 
-    # ==================== 新增：安全拆分止盈数量（优先保障 TP1 至少 1 张） ====================
+    # ==================== 安全拆分止盈数量 ====================
     def _safe_split_tp_qty(self, total_qty: int):
-        """
-        安全拆分止盈数量（深币专用）
-        目标：尽量保证 TP1 至少有 1 张
-        """
         if total_qty < 1:
             return 0, 0, 0
-
-        # 正常计算
         raw_qty1 = total_qty * 0.10
         raw_qty2 = total_qty * 0.30
         raw_qty3 = total_qty - raw_qty1 - raw_qty2
@@ -76,38 +63,28 @@ class DeepcoinProcessor:
         qty2 = int(raw_qty2)
         qty3 = int(raw_qty3)
 
-        # 情况1：TP1 已经 ≥ 1 张 → 正常执行 10/30/60
         if qty1 >= 1:
             diff = total_qty - (qty1 + qty2 + qty3)
             qty3 += diff
             return qty1, qty2, qty3
-
-        # 情况2：TP1 计算出来 < 1 张 → 强制给 TP1 1 张
         else:
             qty1 = 1
             remaining = total_qty - 1
-
             if remaining <= 0:
                 return 1, 0, 0
-
-            # 把剩余的按约 30/70 的比例分给 TP2 和 TP3
             qty2 = max(1, int(remaining * 0.30))
             qty3 = remaining - qty2
-
-            # 防止出现 0 张
             if qty2 == 0 and qty3 >= 2:
                 qty2 = 1
                 qty3 -= 1
             if qty3 == 0 and qty2 >= 2:
                 qty3 = 1
                 qty2 -= 1
-
             return qty1, qty2, qty3
 
     def _get_or_update_daily_baseline(self, current_balance):
         today = datetime.utcnow().strftime('%Y-%m-%d')
         tracker_file = 'deepcoin_risk_tracker.json'
-        
         if self.daily_start_date != today:
             try:
                 if os.path.exists(tracker_file):
@@ -117,16 +94,14 @@ class DeepcoinProcessor:
                             self.daily_start_date = today
                             self.daily_start_balance = float(data.get('balance'))
                             return self.daily_start_balance
-            except Exception: pass
-                
+            except: pass
             self.daily_start_date = today
             self.daily_start_balance = current_balance
             try:
                 with open(tracker_file, 'w') as f:
                     json.dump({'date': today, 'balance': current_balance}, f)
-            except Exception: pass
+            except: pass
             logger.info(f"📅 新的交易日 ({today}) 开启，重置深币本金基线: {current_balance:.2f} USDT")
-            
         return self.daily_start_balance
 
     def process_signal(self, payload: dict):
@@ -168,7 +143,6 @@ class DeepcoinProcessor:
 
                 balance = deepcoin_client.get_available_balance()
                 baseline = self._get_or_update_daily_baseline(balance)
-                
                 daily_pnl_pct = (balance - baseline) / baseline * 100 if baseline > 0 else 0
                 
                 if daily_pnl_pct <= self.cb_level2_pct:
@@ -197,7 +171,7 @@ class DeepcoinProcessor:
 
                 for attempt in range(3):
                     res = deepcoin_client.place_market_order(self.symbol, open_side, open_pos_side, target_qty)
-                    if res and str(res.get("code")) == "0": break
+                    if res and str(res.get("code", "")) == "0": break
                     time.sleep(0.5)
                 
                 pos = None
@@ -230,33 +204,22 @@ class DeepcoinProcessor:
         close_side = "sell" if self.current_side == "LONG" else "buy"
         pos_side = "long" if self.current_side == "LONG" else "short"
         
-        # ==================== 使用安全拆分逻辑 ====================
         qty1, qty2, qty3 = self._safe_split_tp_qty(int(qty))
-
         logger.info(f"📊 安全拆分止盈: TP1={qty1}张, TP2={qty2}张, TP3={qty3}张 (总仓位={qty}张)")
 
-        if qty1 > 0:
-            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp1_px, qty1)
-        if qty2 > 0:
-            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp2_px, qty2)
-        if qty3 > 0:
-            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp3_px, qty3)
+        if qty1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp1_px, qty1)
+        if qty2 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp2_px, qty2)
+        if qty3 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp3_px, qty3)
         
         self.best_price = entry_price
         self.current_sl = entry_price
 
         dingtalk.report_deepcoin_open(
-            side=self.current_side,
-            entry_price=entry_price,
-            qty=qty,
-            tp_prices=[tp1_px, tp2_px, tp3_px],
-            sl_price=self.current_sl,
-            atr=self.current_atr,
-            old_qty=old_qty,
-            tv_price=self.tv_price,
-            tv_tp_prices=[self.tv_tp1, self.tv_tp2, self.tv_tp3],
-            tv_sl_price=self.tv_sl,
-            regime=self.regime
+            side=self.current_side, entry_price=entry_price, qty=qty,
+            tp_prices=[tp1_px, tp2_px, tp3_px], sl_price=self.current_sl,
+            atr=self.current_atr, old_qty=old_qty,
+            tv_price=self.tv_price, tv_tp_prices=[self.tv_tp1, self.tv_tp2, self.tv_tp3],
+            tv_sl_price=self.tv_sl, regime=self.regime
         )
 
         self.watched_qty = qty
@@ -275,8 +238,7 @@ class DeepcoinProcessor:
                     break
                     
                 actual_entry = pos['entry_price']
-                actual_side = pos.get('posSide', '').upper()
-                if not actual_side: actual_side = "LONG" if actual_qty > 0 else "SHORT"
+                actual_side = pos.get('posSide', '').upper() or ("LONG" if actual_qty > 0 else "SHORT")
 
                 if actual_side != self.current_side and actual_side in ["LONG", "SHORT"]:
                     self._close_all("强行对齐")
@@ -289,10 +251,9 @@ class DeepcoinProcessor:
 
                 trail_offset = self.current_atr * self.current_trail_factor * 0.45 
                 is_breakeven = actual_qty < (self.initial_qty * 0.95)
-
                 activation_ratio = self.breakeven_ratios.get(self.regime, 0.60)
+
                 has_moved_favorably = False
-                
                 if self.current_side == "LONG":
                     required_price = self.watched_entry + self.current_atr * self.tp1_mult * activation_ratio
                     has_moved_favorably = curr_px >= required_price
@@ -303,7 +264,6 @@ class DeepcoinProcessor:
                 if is_breakeven and has_moved_favorably:
                     close_side = "sell" if self.current_side == "LONG" else "buy"
                     pos_side = "long" if self.current_side == "LONG" else "short"
-                    
                     if self.current_side == "LONG":
                         calculated_sl = round(self.best_price - trail_offset, 2)
                         new_sl = max(calculated_sl, self.watched_entry, self.current_sl)
@@ -332,11 +292,9 @@ class DeepcoinProcessor:
                     time.sleep(1)
                     with self._lock:
                         self.watched_qty, self.watched_entry = actual_qty, actual_entry
-                        
                     _, _, tp3_px, original_sl_px = self._calc_tp_sl(actual_entry)
                     close_side = "sell" if self.current_side == "LONG" else "buy"
                     pos_side = "long" if self.current_side == "LONG" else "short"
-                    
                     sl_safe = round(actual_entry, 2) if is_breakeven else original_sl_px
                     deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp3_px, actual_qty)
                     deepcoin_client.place_conditional_order(self.symbol, close_side, pos_side, sl_safe, actual_qty)
@@ -361,12 +319,15 @@ class DeepcoinProcessor:
                 close_side = "sell" if self.current_side == "LONG" else "buy"
                 pos_side = "long" if self.current_side == "LONG" else "short"
 
-                logger.info(f"🔨 使用反向市价单强制平仓: {close_side} {qty} 张")
-                deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty)
+                logger.info(f"🔨 强制反向市价单平仓: {close_side} {qty} 张")
+                for i in range(3):
+                    res = deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty)
+                    if res and str(res.get("code", "")) == "0":
+                        break
+                    time.sleep(0.6)
                 time.sleep(0.8)
 
             deepcoin_client.cancel_all_open_orders(self.symbol)
-            time.sleep(0.5)
 
             final_pos = self._get_active_position()
             if final_pos and final_pos.get('size', 0) > 0:
@@ -390,8 +351,7 @@ class DeepcoinProcessor:
         try:
             pos = self._get_active_position()
             if pos and pos['size'] > 0:
-                actual_side = pos.get('posSide', '').upper()
-                if not actual_side: actual_side = "LONG"
+                actual_side = pos.get('posSide', '').upper() or "LONG"
                 self.current_side = actual_side
                 self.initial_qty = pos['size']
                 self.watched_qty = self.initial_qty
