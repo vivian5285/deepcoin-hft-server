@@ -63,16 +63,16 @@ class DeepcoinClient:
             return None
 
     def get_available_balance(self, ccy="USDT"):
-        # 👑 完美读取深币金库：优先读取动态总权益 (Equity) 以确保熔断防线精准！
+        # 👑 完美读取深币金库：根据硬核探针结果，精准定位 equity 字段！
         res = self._request("GET", "/account/balances", {"instType": "SWAP"})
         if isinstance(res, dict) and "data" in res:
             for item in res["data"]:
                 if item.get("ccy") == ccy: 
-                    # eq = 动态总权益(包含未实现盈亏)，它是风控和下注的最精准基准
-                    eq = float(item.get("eq", 0))
-                    if eq > 0:
-                        return eq
-                    # 如果获取不到 eq，再退化使用静态余额 availBal
+                    # 抓取包含浮盈浮亏的绝对总资产 equity
+                    equity = float(item.get("equity", 0))
+                    if equity > 0:
+                        return equity
+                    # 如果异常获取不到 equity，再退化使用静态余额 availBal
                     return float(item.get("availBal", 0)) 
         return 0.0
 
