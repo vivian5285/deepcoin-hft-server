@@ -56,7 +56,53 @@ class DeepcoinProcessor:
             4: 0.55
         }
 
-        logger.info("🧠 深币 V10.41 最终呼吸空间版大脑加载完毕（已优化关闭逻辑 + 分批止盈保护）")
+        logger.info("🧠 深币 V10.41 最终呼吸空间版大脑加载完毕（已优化小仓位 TP1 保障逻辑）")
+
+    # ==================== 新增：安全拆分止盈数量（优先保障 TP1 至少 1 张） ====================
+    def _safe_split_tp_qty(self, total_qty: int):
+        """
+        安全拆分止盈数量（深币专用）
+        目标：尽量保证 TP1 至少有 1 张
+        """
+        if total_qty < 1:
+            return 0, 0, 0
+
+        # 正常计算
+        raw_qty1 = total_qty * 0.10
+        raw_qty2 = total_qty * 0.30
+        raw_qty3 = total_qty - raw_qty1 - raw_qty2
+
+        qty1 = int(raw_qty1)
+        qty2 = int(raw_qty2)
+        qty3 = int(raw_qty3)
+
+        # 情况1：TP1 已经 ≥ 1 张 → 正常执行 10/30/60
+        if qty1 >= 1:
+            diff = total_qty - (qty1 + qty2 + qty3)
+            qty3 += diff
+            return qty1, qty2, qty3
+
+        # 情况2：TP1 计算出来 < 1 张 → 强制给 TP1 1 张
+        else:
+            qty1 = 1
+            remaining = total_qty - 1
+
+            if remaining <= 0:
+                return 1, 0, 0
+
+            # 把剩余的按约 30/70 的比例分给 TP2 和 TP3
+            qty2 = max(1, int(remaining * 0.30))
+            qty3 = remaining - qty2
+
+            # 防止出现 0 张
+            if qty2 == 0 and qty3 >= 2:
+                qty2 = 1
+                qty3 -= 1
+            if qty3 == 0 and qty2 >= 2:
+                qty3 = 1
+                qty2 -= 1
+
+            return qty1, qty2, qty3
 
     def _get_or_update_daily_baseline(self, current_balance):
         today = datetime.utcnow().strftime('%Y-%m-%d')
@@ -114,7 +160,6 @@ class DeepcoinProcessor:
                     dingtalk.report_system_alert("防追高拦截", f"偏差过大: 现价 {curr_px} vs TV {self.tv_price}")
                     return
 
-                # 新信号到达：强制清理旧仓位
                 self._close_all("新信号到达，强制清理旧仓位与挂单")
                 time.sleep(0.8)
 
@@ -185,28 +230,21 @@ class DeepcoinProcessor:
         close_side = "sell" if self.current_side == "LONG" else "buy"
         pos_side = "long" if self.current_side == "LONG" else "short"
         
-        # ==================== 安全的分批止盈数量计算 ====================
-        raw_qty1 = qty * self.tp_ratios[0]
-        raw_qty2 = qty * self.tp_ratios[1]
-        raw_qty3 = qty - raw_qty1 - raw_qty2
+        # ==================== 使用安全拆分逻辑 ====================
+        qty1, qty2, qty3 = self._safe_split_tp_qty(int(qty))
 
-        qty1 = max(1, int(raw_qty1)) if raw_qty1 >= 1 else 0
-        qty2 = max(1, int(raw_qty2)) if raw_qty2 >= 1 else 0
-        qty3 = max(1, int(raw_qty3)) if raw_qty3 >= 1 else 0
+        logger.info(f"📊 安全拆分止盈: TP1={qty1}张, TP2={qty2}张, TP3={qty3}张 (总仓位={qty}张)")
 
-        if qty1 == 0 and qty2 > 0: qty2 += 1
-        if qty2 == 0 and qty3 > 0: qty3 += 1
-
-        logger.info(f"📊 分批止盈数量: TP1={qty1}, TP2={qty2}, TP3={qty3} (原始仓位={qty})")
-
-        if qty1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp1_px, qty1)
-        if qty2 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp2_px, qty2)
-        if qty3 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp3_px, qty3)
+        if qty1 > 0:
+            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp1_px, qty1)
+        if qty2 > 0:
+            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp2_px, qty2)
+        if qty3 > 0:
+            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp3_px, qty3)
         
         self.best_price = entry_price
         self.current_sl = entry_price
 
-        # ==================== 更新后的钉钉报告调用 ====================
         dingtalk.report_deepcoin_open(
             side=self.current_side,
             entry_price=entry_price,
