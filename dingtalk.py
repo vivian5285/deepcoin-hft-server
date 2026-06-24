@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 import os, time, hmac, hashlib, base64, urllib.parse, logging, requests
 from datetime import datetime
-from dotenv import load_env
+from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
@@ -11,8 +11,9 @@ logger = logging.getLogger(__name__)
 DINGTALK_WEBHOOK = os.getenv("DINGTALK_WEBHOOK", "")
 DINGTALK_SECRET = os.getenv("DINGTALK_SECRET", "")
 
-# ==================== 颜色辅助 ====================
+# ==================== 深币专属紫色美学 ====================
 def _purple(text): return f'<font color="#9B59B6">{text}</font>'
+def _deep_purple(text): return f'<font color="#4B0082">{text}</font>'
 def _green(text): return f'<font color="#27AE60">{text}</font>'
 def _red(text): return f'<font color="#E74C3C">{text}</font>'
 def _blue(text): return f'<font color="#3498DB">{text}</font>'
@@ -27,79 +28,100 @@ def _get_signed_url():
     sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
     return f"{DINGTALK_WEBHOOK}&timestamp={ts}&sign={sign}"
 
-def send_alert(title, data_dict, header_color="#9B59B6"):
+def send_alert(title, data_dict, header_color="#4B0082"):
     signed_url = _get_signed_url()
     if not signed_url: return
 
-    text_lines = [f"- **{k}** : {v}" for k, v in data_dict.items()]
+    text_lines = [f"- **{k}**: {v}" for k, v in data_dict.items()]
     body_text = "\n".join(text_lines)
     now_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     markdown_text = f"""### <font color="{header_color}">{title}</font>
-> **⏱ 时间**：`{now_time}`  
-> **📍 系统**：深币高频刷单 · 自动驾驶引擎
+> **⏱ 军区时间**：`{now_time}`  
+> **📍 阵地标识**：[ 中海资本 · 深币隐身雷达 v7.0 ]
 
 ---
 {body_text}
 
 ---
-*🤖 Deepcoin Fee Machine · 紫色专业版*
+*🖨️ Quant AI · 深币紫金高频印钞机*
 """
-
     payload = {"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}
-    try:
-        requests.post(signed_url, json=payload, timeout=6)
-    except Exception as e:
-        logger.error(f"钉钉发送失败: {e}")
+    try: requests.post(signed_url, json=payload, timeout=6)
+    except Exception as e: logger.error(f"钉钉发送失败: {e}")
 
-# ==================== 报告函数 ====================
+# ==================== 动作战报（严格实盘核查后触发） ====================
+
+def report_deepcoin_open(side, entry_price, qty, fee_cover_price, tv_tp1):
+    side_str = _green("🟩 现价做多 (LONG)") if side == "LONG" else _red("🟥 现价做空 (SHORT)")
+    data = {
+        "🎛️ 潜伏方向": side_str,
+        "💰 进场均价": f"**`{entry_price:.2f}`** USDT",
+        "📦 阵地头寸": f"`{qty}` 张 (隐身防守状态)",
+        "⚙️ 目标参数": f"保本线: **`{fee_cover_price:.2f}`** | 利润线: **`{tv_tp1:.2f}`**",
+        "📡 系统状态": _deep_purple("🟢 实盘已核查：建仓成功，雷达静默盯盘中...")
+    }
+    send_alert("🖨️ 战神入局：深币隐身建仓完毕", data, header_color="#4B0082")
 
 def report_fee_cover_reached(side, entry_price, fee_cover_price, remaining_qty):
-    side_str = _green("多头") if side == "LONG" else _red("空头")
+    side_str = _green("多") if side == "LONG" else _red("空")
     data = {
-        "方向": side_str,
-        "入场均价": f"`{entry_price:.2f}` USDT",
-        "保本目标价": _green(f"**{fee_cover_price:.2f}** USDT"),
-        "剩余仓位": f"`{remaining_qty}`",
-        "状态": _purple("🚀 雷达已启动 · 止损移至保本位")
+        "触发方向": side_str,
+        "入场成本": f"`{entry_price:.2f}` USDT",
+        "保本目标": _green(f"**{fee_cover_price:.2f}** USDT"),
+        "剩余头寸": f"`{remaining_qty}` 张",
+        "实盘核查": _purple("✅ 确认突破保本线，雷达第一重解锁！")
     }
-    send_alert("🛡️ 第一重达成：保本雷达启动", data, header_color="#8E44AD")
+    send_alert("🛡️ 第一重达成：雷达激活护甲", data, header_color="#8E44AD")
 
 def report_switch_to_tp1(side, remaining_qty, tv_tp1):
-    side_str = _green("多头") if side == "LONG" else _red("空头")
+    side_str = _green("多") if side == "LONG" else _red("空")
     data = {
-        "方向": side_str,
-        "剩余仓位": f"`{remaining_qty}`",
-        "切换止盈至": _orange(f"**TV tp1 = {tv_tp1:.2f}** USDT"),
-        "策略": _purple("雷达持续工作 · 目标吃到 tp1 全平")
+        "操作方向": side_str,
+        "参与头寸": f"`{remaining_qty}` 张",
+        "挂单目标": _orange(f"**TV tp1 = {tv_tp1:.2f}** USDT"),
+        "实盘核查": _purple("✅ 交易所限价单(TP1)已成功挂载！")
     }
-    send_alert("🎯 第二重启动：剩余仓位挂 TV tp1", data, header_color="#9B59B6")
+    send_alert("🎯 第二重突击：挂载 TP1 利润网", data, header_color="#9B59B6")
 
-def report_radar_move(side, new_sl, reason="锁利润"):
-    side_str = _green("多头") if side == "LONG" else _red("空头")
+def report_radar_move(side, new_sl):
+    side_str = _green("多") if side == "LONG" else _red("空")
     data = {
-        "方向": side_str,
-        "新止损位": _green(f"**{new_sl:.2f}** USDT"),
-        "触发原因": reason
+        "追踪方向": side_str,
+        "最新止损": _green(f"**{new_sl:.2f}** USDT"),
+        "实盘核查": _purple("✅ 交易所条件止损单已成功上移！")
     }
-    send_alert("📈 雷达上移止损", data, header_color="#8E44AD")
+    send_alert("📈 雷达捷报：锁润防线推升", data, header_color="#8E44AD")
 
 def report_supervisor_close(reason):
-    if "TP3" in reason or "tp1" in reason.lower():
-        title = "🏆 第二重达成：吃到 tp1 全平"
+    if "TP3" in reason or "tp1" in reason.lower() or "止盈" in reason:
+        title = "🏆 完美清场：利润与返佣双收"
         header_color = "#27AE60"
         color_reason = _green(f"**{reason}**")
-    elif "保护" in reason:
-        title = "🛡️ 保护性全平"
+    elif "保护" in reason or "防守" in reason:
+        title = "🛡️ 战术撤退：保本/防守触发"
         header_color = "#E67E22"
         color_reason = _orange(f"**{reason}**")
     else:
-        title = "🧹 仓位已清零"
+        title = "🧹 深币阵地彻底清空"
         header_color = "#7F8C8D"
         color_reason = _gray(f"**{reason}**")
 
     data = {
         "触发原因": color_reason,
-        "系统状态": "深币高频刷单系统 · 已执行"
+        "实盘核查": "**✅ API 确认：所有挂单已撤销，真实仓位已归零！**"
     }
     send_alert(title, data, header_color=header_color)
+
+def report_force_align(real_side, expected_side):
+    send_alert("🚨 严重违纪 · 强行物理对齐", {
+        "实盘方向": f"`{real_side}`",
+        "TV期望方向": f"`{expected_side}`",
+        "处理结果": "**已执行强制市价平仓，强行对齐源头！**"
+    }, header_color="#FF0000")
+
+def report_system_alert(title, detail):
+    send_alert(f"⚠️ 系统熔断：{title}", {
+        "告警级别": _red("最高级别 (CRITICAL)"),
+        "详情": _red(f"**{detail}**")
+    }, header_color="#FF0000")
