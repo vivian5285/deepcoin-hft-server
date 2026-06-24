@@ -58,18 +58,30 @@ class DeepcoinClient:
             logger.error(f"Deepcoin 请求失败 {endpoint}: {e}")
             return None
 
-    # ==================== 精简可靠的撤单逻辑 ====================
+    # ==================== 终极暴力清道夫：撤销普通与条件挂单 ====================
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
-        logger.info(f"🧹 开始清理 {symbol} 普通挂单...")
+        logger.info(f"🧹 开始暴力清理 {symbol} 所有盘口挂单(含止损条件单)...")
         try:
+            # 1. 撤销普通限价单 (TP单)
             pending = self._request("GET", "/trade/orders-pending", {"instType": "SWAP", "instId": symbol})
             if pending and isinstance(pending, dict) and pending.get('data'):
                 for order in pending['data']:
                     ord_id = order.get("ordId")
                     if ord_id:
                         self._request("POST", "/trade/cancel-order", {"instId": symbol, "ordId": ord_id})
-                        time.sleep(0.2)
-            logger.info(f"✅ {symbol} 普通挂单清理完成")
+                        time.sleep(0.1)
+
+            # 2. 撤销条件止损单 (Algo Orders)
+            algo_pending = self._request("GET", "/trade/orders-algo-pending", {"instType": "SWAP", "instId": symbol, "algoOrdType": "conditional"})
+            if algo_pending and isinstance(algo_pending, dict) and algo_pending.get('data'):
+                for algo in algo_pending['data']:
+                    algo_id = algo.get("algoId")
+                    if algo_id:
+                        # Deepcoin/OKX 体系下撤销策略单通常传数组
+                        self._request("POST", "/trade/cancel-algos", [{"instId": symbol, "algoId": algo_id}])
+                        time.sleep(0.1)
+                        
+            logger.info(f"✅ {symbol} 所有挂单清理完毕，头寸已释放！")
         except Exception as e:
             logger.error(f"撤单异常: {e}")
 
@@ -111,5 +123,19 @@ class DeepcoinClient:
             "px": str(px), "mrgPosition": "merge"
         }
         return self._request("POST", "/trade/order", params)
+
+    # 🚀 新增：补齐缺失的条件单能力，防止雷达追踪时报错
+    def place_conditional_order(self, symbol, side, pos_side, trigger_px, qty):
+        params = {
+            "instId": symbol, 
+            "tdMode": "cross",
+            "side": side, 
+            "posSide": pos_side,
+            "ordType": "conditional", 
+            "sz": str(int(qty)),
+            "triggerPx": str(trigger_px),
+            "orderPx": "-1"  # 市价触发
+        }
+        return self._request("POST", "/trade/order-algo", params)
 
 deepcoin_client = DeepcoinClient()
