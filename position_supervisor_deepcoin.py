@@ -156,11 +156,17 @@ class DeepcoinProcessor:
         self.initial_qty = qty
         self.monitoring = True
 
+        # 钉钉报告（已匹配最新 dingtalk.py）
         dingtalk.report_deepcoin_open(
-            side=self.current_side, entry_price=entry_price, qty=int(qty),
-            tp_price=tp_px, sl_price=self.current_sl,
-            atr=self.current_atr, old_qty=0,
-            tv_price=self.tv_price, regime=self.regime
+            side=self.current_side,
+            entry_price=entry_price,
+            qty=int(qty),
+            tp_price=tp_px,
+            sl_price=self.current_sl,
+            atr=self.current_atr,
+            old_qty=0,
+            tv_price=self.tv_price,
+            regime=self.regime
         )
 
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
