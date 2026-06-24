@@ -17,7 +17,6 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
 
-        # 第一重：覆盖手续费 + 保本
         self.fee_cover_margin = 0.0014
         self.radar_activated = False
         self.fee_cover_price = 0.0
@@ -28,12 +27,11 @@ class PositionSupervisor:
         self.watched_qty = 0.0
         self.watched_entry = 0.0
         self.current_sl = 0.0
-
-        # 深币专用：固定金额阈值（推荐 $7）
         self.price_diff_threshold = 7.0
+        self.last_protect_time = 0
 
         self.state_file = 'deepcoin_vps_state.json'
-        logger.info("🧠 深币 VPS [最终版 - 固定金额 $7 阈值] 已加载")
+        logger.info("🧠 深币 VPS [全域强壮适配版] 已加载")
 
     def handle_signal(self, payload):
         raw_action = payload.get("action", "").upper()
@@ -43,17 +41,21 @@ class PositionSupervisor:
         if not self._lock.acquire(blocking=False): return
 
         try:
-            self.monitoring = False
-            self.radar_activated = False
-
             if raw_action in ["LONG", "SHORT"]:
                 self.last_tv_side = raw_action
                 self._handle_smart_entry(raw_action)
 
+            elif raw_action == "CLOSE_TP3":
+                if position_manager.has_position(self.symbol):
+                    self._close_all("🎯 TP3 止盈全平")
+
+            elif raw_action == "CLOSE_PROTECT":
+                self._handle_protective_close()
+
         finally:
             self._lock.release()
 
-    # ==================== 深币智能入场处理（固定金额 $7） ====================
+    # ==================== 智能入场（保持 $7 阈值） ====================
     def _handle_smart_entry(self, action):
         deepcoin_client.cancel_all_open_orders()
         self._close_all("新方向到达，先全平再开仓")
@@ -70,18 +72,16 @@ class PositionSupervisor:
         avg_price = float(current_pos["entryPrice"])
 
         if current_side == action:
-            # 同方向
             diff = abs(alert_price - avg_price)
             if diff <= self.price_diff_threshold:
-                logger.info(f"[深币忽略] 同方向差异 ${diff:.2f} ≤ ${self.price_diff_threshold}，直接忽略")
+                logger.info(f"[深币忽略] 同方向差异 ${diff:.2f} ≤ $7，直接忽略")
                 return
             else:
-                logger.info(f"[深币换仓] 同方向差异 ${diff:.2f} > ${self.price_diff_threshold}，执行先平后开")
+                logger.info(f"[深币换仓] 同方向差异 ${diff:.2f} > $7，执行先平后开")
                 self._close_all("同方向换仓")
                 time.sleep(1.2)
                 self._open_position(action)
         else:
-            # 反方向
             logger.info("[深币反方向] 执行先平后开")
             self._close_all("反方向信号")
             time.sleep(1.2)
@@ -118,7 +118,6 @@ class PositionSupervisor:
                 curr_px = deepcoin_client.get_current_price(self.symbol)
                 remaining_qty = abs(float(pos.get("positionAmt", 0)))
 
-                # 第一重：到达保本位
                 reached = False
                 if self.current_side == "LONG" and curr_px >= self.fee_cover_price:
                     reached = True
@@ -130,13 +129,11 @@ class PositionSupervisor:
                     self.current_sl = self.fee_cover_price
                     dingtalk.report_fee_cover_reached(self.current_side, self.watched_entry, self.fee_cover_price, remaining_qty)
 
-                    # 有剩余仓位才切换到 TV tp1
                     if remaining_qty > 0.001 and self.tv_tp1 > 0:
                         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
                         deepcoin_client.place_limit_order(close_side, remaining_qty, self.tv_tp1, reduce_only=True)
                         dingtalk.report_switch_to_tp1(self.current_side, remaining_qty, self.tv_tp1)
 
-                # 雷达移动保本止损
                 if self.radar_activated:
                     moved = False
                     if self.current_side == "LONG" and curr_px > self.current_sl:
@@ -160,6 +157,19 @@ class PositionSupervisor:
             except Exception as e:
                 logger.error(f"雷达异常: {e}")
             time.sleep(3.5)
+
+    # ==================== 保护性全平处理（新增） ====================
+    def _handle_protective_close(self):
+        if not position_manager.has_position(self.symbol):
+            logger.info("[保护性全平] 当前无持仓，忽略该警报")
+            return
+
+        if time.time() - self.last_protect_time < 30:
+            logger.info("[保护性全平] 短时间内重复，忽略")
+            return
+
+        self.last_protect_time = time.time()
+        self._close_all("🛡️ 保护性全平")
 
     def _close_all(self, reason=""):
         deepcoin_client.cancel_all_open_orders()
