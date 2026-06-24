@@ -17,8 +17,8 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
 
-        # 第一重：覆盖手续费 + 保本
-        self.fee_cover_margin = 0.0014          # 0.14%，可根据实盘微调
+        # 第一重：覆盖手续费 + 保本（实盘可微调）
+        self.fee_cover_margin = 0.0014
         self.radar_activated = False
         self.fee_cover_price = 0.0
         self.tv_tp1 = 0.0
@@ -30,20 +30,7 @@ class PositionSupervisor:
         self.current_sl = 0.0
 
         self.state_file = 'deepcoin_vps_state.json'
-        logger.info("🧠 深币 VPS [两道平仓 + 雷达保本最终版] 已加载")
-
-    def _save_state(self):
-        try:
-            with open(self.state_file, 'w') as f:
-                json.dump({
-                    "last_tv_side": self.last_tv_side,
-                    "current_side": self.current_side,
-                    "watched_qty": self.watched_qty,
-                    "watched_entry": self.watched_entry,
-                    "current_sl": self.current_sl,
-                    "radar_activated": self.radar_activated
-                }, f)
-        except: pass
+        logger.info("🧠 深币 VPS [最终完善版 - 已对齐 v6.9.12] 已加载")
 
     def handle_signal(self, payload):
         raw_action = payload.get("action", "").upper()
@@ -105,21 +92,24 @@ class PositionSupervisor:
                 remaining_qty = abs(float(pos.get("positionAmt", 0)))
 
                 # === 第一重：到达保本位 ===
-                reached = (self.current_side == "LONG" and curr_px >= self.fee_cover_price) or \
-                          (self.current_side == "SHORT" and curr_px <= self.fee_cover_price)
+                reached = False
+                if self.current_side == "LONG" and curr_px >= self.fee_cover_price:
+                    reached = True
+                elif self.current_side == "SHORT" and curr_px <= self.fee_cover_price:
+                    reached = True
 
                 if reached and not self.radar_activated:
                     self.radar_activated = True
                     self.current_sl = self.fee_cover_price
                     dingtalk.report_fee_cover_reached(self.current_side, self.watched_entry, self.fee_cover_price, remaining_qty)
 
-                    # 有剩余仓位才挂 TV tp1
+                    # 有剩余仓位才切换到 TV tp1
                     if remaining_qty > 0.001 and self.tv_tp1 > 0:
                         close_side = "SHORT" if self.current_side == "LONG" else "LONG"
                         deepcoin_client.place_limit_order(close_side, remaining_qty, self.tv_tp1, reduce_only=True)
                         dingtalk.report_switch_to_tp1(self.current_side, remaining_qty, self.tv_tp1)
 
-                # === 雷达移动保本 ===
+                # === 雷达移动保本止损 ===
                 if self.radar_activated:
                     moved = False
                     if self.current_side == "LONG" and curr_px > self.current_sl:
