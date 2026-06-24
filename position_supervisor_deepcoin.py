@@ -19,7 +19,7 @@ class DeepcoinProcessor:
         
         self.leverage = 20
         self.face_value = 0.1
-        self.fee_cover_margin = 0.0015          # 核心：0.15% 覆盖手续费
+        self.fee_cover_margin = 0.0015
         
         self.current_atr = 30.0
         self.sl_mult = 1.03
@@ -81,16 +81,22 @@ class DeepcoinProcessor:
                     dingtalk.report_system_alert("防追高拦截", f"现价 {curr_px} vs TV {self.tv_price}，放弃刷单")
                     return
 
-                # 强制清理旧仓位（加强版）
+                # ==================== 关键修改：使用 force_cancel_all ====================
+                logger.info("🚨 新信号到达，执行强制激进撤单...")
+                deepcoin_client.force_cancel_all(self.symbol)
+                time.sleep(0.7)
+
+                # 再执行完整平仓流程
                 self._close_all("新信号到达，强制清理旧阵地")
-                time.sleep(1.2)
+                time.sleep(1.0)
 
                 # 二次确认仓位是否真的归零
                 final_check = self._get_active_position()
                 if final_check and final_check.get('size', 0) > 0:
-                    dingtalk.report_system_alert("严重异常", "多次平仓后仍残留仓位，拒绝开新仓！")
+                    dingtalk.report_system_alert("严重异常", "多次强制平仓后仍残留仓位，拒绝开新仓！")
                     return
 
+                # 风控 & 开仓逻辑
                 balance = deepcoin_client.get_available_balance()
                 baseline = self._get_or_update_daily_baseline(balance)
                 daily_pnl_pct = (balance - baseline) / baseline * 100 if baseline > 0 else 0
@@ -146,7 +152,6 @@ class DeepcoinProcessor:
         close_side = "sell" if self.current_side == "LONG" else "buy"
         pos_side = "long" if self.current_side == "LONG" else "short"
 
-        # 100% 仓位一波流挂限价单
         deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_px, int(qty))
 
         self.best_price = entry_price
@@ -156,7 +161,6 @@ class DeepcoinProcessor:
         self.initial_qty = qty
         self.monitoring = True
 
-        # 钉钉报告（已匹配最新 dingtalk.py）
         dingtalk.report_deepcoin_open(
             side=self.current_side,
             entry_price=entry_price,
@@ -177,14 +181,12 @@ class DeepcoinProcessor:
                 pos = self._get_active_position()
                 actual_qty = int(pos['size']) if pos else 0
 
-                # 仓位归零 = 刷单成功
                 if actual_qty == 0:
                     self._close_all("✅ 刷单完成（手续费已覆盖）")
                     break
 
                 actual_side = pos.get('posSide', '').upper() or ("LONG" if actual_qty > 0 else "SHORT")
 
-                # 方向对齐检查
                 if actual_side != self.last_tv_side and actual_side in ["LONG", "SHORT"]:
                     self._close_all("强行对齐")
                     dingtalk.report_force_align(actual_side, self.last_tv_side)
@@ -192,7 +194,6 @@ class DeepcoinProcessor:
 
                 curr_px = deepcoin_client.get_current_price(self.symbol)
 
-                # 硬止损兜底
                 if (self.current_side == "LONG" and curr_px <= self.current_sl) or \
                    (self.current_side == "SHORT" and curr_px >= self.current_sl):
                     self._close_all("触发极限兜底止损")
