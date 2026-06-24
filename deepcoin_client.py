@@ -51,40 +51,73 @@ class DeepcoinClient:
             url = f"{self.base_url}{request_path}"
             resp = requests.request(method.upper(), url, data=body_str if body_str else None, headers=headers, timeout=10)
             res_json = resp.json()
-            if str(res_json.get("code", "")) != "0":
-                logger.warning(f"Deepcoin API 返回: {res_json}")
             return res_json
         except Exception as e:
             logger.error(f"Deepcoin 请求失败 {endpoint}: {e}")
             return None
 
-    # ==================== 终极暴力清道夫：撤销普通与条件挂单 ====================
+    # ==================== 加强版撤单（核心优化） ====================
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
-        logger.info(f"🧹 开始暴力清理 {symbol} 所有盘口挂单(含止损条件单)...")
+        logger.info(f"🧹 开始加强版撤单: {symbol}")
         try:
-            # 1. 撤销普通限价单 (TP单)
+            # 第一步：获取所有待成交订单
             pending = self._request("GET", "/trade/orders-pending", {"instType": "SWAP", "instId": symbol})
-            if pending and isinstance(pending, dict) and pending.get('data'):
-                for order in pending['data']:
-                    ord_id = order.get("ordId")
-                    if ord_id:
-                        self._request("POST", "/trade/cancel-order", {"instId": symbol, "ordId": ord_id})
-                        time.sleep(0.1)
+            
+            if not pending or not isinstance(pending, dict) or not pending.get('data'):
+                logger.info(f"✅ {symbol} 当前无挂单")
+                return True
 
-            # 2. 撤销条件止损单 (Algo Orders)
-            algo_pending = self._request("GET", "/trade/orders-algo-pending", {"instType": "SWAP", "instId": symbol, "algoOrdType": "conditional"})
-            if algo_pending and isinstance(algo_pending, dict) and algo_pending.get('data'):
-                for algo in algo_pending['data']:
-                    algo_id = algo.get("algoId")
-                    if algo_id:
-                        # Deepcoin/OKX 体系下撤销策略单通常传数组
-                        self._request("POST", "/trade/cancel-algos", [{"instId": symbol, "algoId": algo_id}])
-                        time.sleep(0.1)
-                        
-            logger.info(f"✅ {symbol} 所有挂单清理完毕，头寸已释放！")
+            orders = pending['data']
+            logger.info(f"发现 {len(orders)} 个待撤订单，开始逐个取消...")
+
+            success_count = 0
+            for order in orders:
+                ord_id = order.get("ordId")
+                if not ord_id:
+                    continue
+
+                # 每个订单尝试取消2次
+                cancelled = False
+                for attempt in range(2):
+                    res = self._request("POST", "/trade/cancel-order", {"instId": symbol, "ordId": ord_id})
+                    if res and str(res.get("code", "")) == "0":
+                        cancelled = True
+                        success_count += 1
+                        break
+                    time.sleep(0.3)
+
+                if not cancelled:
+                    logger.warning(f"订单 {ord_id} 取消失败")
+                time.sleep(0.25)  # 避免频率限制
+
+            # 最终验证
+            time.sleep(0.8)
+            final_check = self._request("GET", "/trade/orders-pending", {"instType": "SWAP", "instId": symbol})
+            remaining = len(final_check.get('data', [])) if final_check and final_check.get('data') else 0
+
+            if remaining == 0:
+                logger.info(f"✅ 加强版撤单成功，共取消 {success_count} 个订单")
+                return True
+            else:
+                logger.warning(f"⚠️ 撤单后仍剩余 {remaining} 个订单")
+                return False
+
         except Exception as e:
-            logger.error(f"撤单异常: {e}")
+            logger.error(f"加强版撤单异常: {e}")
+            return False
 
+    # ==================== 强制激进撤单（新信号到达时使用） ====================
+    def force_cancel_all(self, symbol="ETH-USDT-SWAP"):
+        logger.warning(f"🚨 执行强制激进撤单: {symbol}")
+        for i in range(3):
+            result = self.cancel_all_open_orders(symbol)
+            if result:
+                return True
+            time.sleep(1)
+        logger.error("强制撤单多次尝试后仍未完全成功")
+        return False
+
+    # ==================== 其他功能保持不变 ====================
     def get_available_balance(self, ccy="USDT"):
         res = self._request("GET", "/account/balances", {"instType": "SWAP"})
         if isinstance(res, dict) and "data" in res:
@@ -124,18 +157,5 @@ class DeepcoinClient:
         }
         return self._request("POST", "/trade/order", params)
 
-    # 🚀 新增：补齐缺失的条件单能力，防止雷达追踪时报错
-    def place_conditional_order(self, symbol, side, pos_side, trigger_px, qty):
-        params = {
-            "instId": symbol, 
-            "tdMode": "cross",
-            "side": side, 
-            "posSide": pos_side,
-            "ordType": "conditional", 
-            "sz": str(int(qty)),
-            "triggerPx": str(trigger_px),
-            "orderPx": "-1"  # 市价触发
-        }
-        return self._request("POST", "/trade/order-algo", params)
 
 deepcoin_client = DeepcoinClient()
