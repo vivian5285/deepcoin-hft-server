@@ -19,7 +19,7 @@ class DeepcoinProcessor:
         
         self.leverage = 20
         self.face_value = 0.1
-        self.fee_cover_margin = 0.0015          # 保本比例 0.15%
+        self.fee_cover_margin = 0.0015
         
         self.current_atr = 30.0
         self.sl_mult = 1.03
@@ -164,11 +164,17 @@ class DeepcoinProcessor:
         self.initial_qty = qty
         self.monitoring = True
 
+        # 已同步更新为新版 dingtalk 参数
         dingtalk.report_deepcoin_open(
-            side=self.current_side, entry_price=entry_price, qty=qty,
-            tp_price=self.fee_cover_price, sl_price=0,
-            atr=self.current_atr, old_qty=0,
-            tv_price=self.tv_price, regime=self.regime
+            side=self.current_side,
+            entry_price=entry_price,
+            qty=qty,
+            fee_cover_price=self.fee_cover_price,
+            tv_tp1=self.tv_tp1,
+            atr=self.current_atr,
+            old_qty=0,
+            tv_price=self.tv_price,
+            regime=self.regime
         )
 
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
@@ -194,7 +200,6 @@ class DeepcoinProcessor:
 
                 curr_px = deepcoin_client.get_current_price(self.symbol)
 
-                # 更新最优价格
                 if self.current_side == "LONG":
                     self.best_price = max(self.best_price, curr_px)
                 else:
@@ -213,9 +218,8 @@ class DeepcoinProcessor:
                     if has_moved:
                         breakeven_activated = True
                         logger.info("雷达启动移动保本止损")
-                        # 这里可以后续扩展为真正下止损单或仅记录
 
-                # 轻追踪（移动保本后启动）
+                # 轻追踪
                 if breakeven_activated:
                     trail_offset = abs(self.fee_cover_price - self.watched_entry) * 0.42
                     if self.current_side == "LONG":
