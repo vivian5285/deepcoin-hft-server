@@ -15,6 +15,7 @@ def _purple(text): return f'<font color="#9B59B6">{text}</font>'
 def _deep_purple(text): return f'<font color="#4B0082">{text}</font>'
 def _green(text): return f'<font color="#27AE60">{text}</font>'
 def _red(text): return f'<font color="#E74C3C">{text}</font>'
+def _blue(text): return f'<font color="#3498DB">{text}</font>'
 def _orange(text): return f'<font color="#E67E22">{text}</font>'
 def _gray(text): return f'<font color="#7F8C8D">{text}</font>'
 
@@ -29,25 +30,35 @@ def send_alert(title, data_dict, header_color="#4B0082"):
     signed_url = _get_signed_url()
     if not signed_url: return
     body_text = "\n".join([f"- **{k}**: {v}" for k, v in data_dict.items()])
-    markdown_text = f"### <font color=\"{header_color}\">{title}</font>\n> **⏱ 军区时间**：`{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  \n> **📍 阵地标识**：[ 中海资本 · 深币双擎雷达 v7.1 ]\n\n---\n{body_text}\n\n---\n*🖨️ Quant AI · 深币紫金高频印钞机*"
+    markdown_text = f"### <font color=\"{header_color}\">{title}</font>\n> **⏱ 军区时间**：`{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  \n> **📍 阵地标识**：[ 中海资本 · 深币双擎雷达 v8.0 ]\n\n---\n{body_text}\n\n---\n*🖨️ Quant AI · 深币紫金高频印钞机*"
     try: requests.post(signed_url, json={"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}, timeout=6)
     except Exception as e: logger.error(f"钉钉发送失败: {e}")
 
-def report_deepcoin_open(side, entry_price, tv_price, qty, fee_qty, fee_price, tp1_qty, tp1_price):
+def get_regime_name(regime_code):
+    if regime_code == 1: return _gray("🧊 [1档] 极弱波段 (15% 防守仓)")
+    if regime_code == 2: return _blue("🚶 [2档] 弱势推升 (25% 标准仓)")
+    if regime_code == 3: return _orange("🏃 [3档] 中势单边 (35% 进攻仓)")
+    if regime_code == 4: return _green("🚀 [4档] 强势主升 (50% 满血仓)")
+    return "未知状态"
+
+def report_deepcoin_open(side, regime, atr, entry_price, tv_price, qty, fee_qty, fee_price, tp1_qty, local_tp1, tv_tp1):
     side_str = _green("🟩 现价做多 (LONG)") if side == "LONG" else _red("🟥 现价做空 (SHORT)")
-    slip_txt = f"{(entry_price - tv_price if side == 'LONG' else tv_price - entry_price):+.2f} 刀" if tv_price > 0 else "未知 (TV未传价)"
+    slip_txt = f"{(entry_price - tv_price if side == 'LONG' else tv_price - entry_price):+.2f} 刀" if tv_price > 0 else "未知"
+    
     send_alert("🖨️ 战神入局：深币双擎建仓完毕", {
         "🎛️ 潜伏方向": side_str,
+        "📊 市场强度": get_regime_name(regime),
         "💰 进场均价": f"**`{entry_price:.2f}`** USDT (滑点: **{slip_txt}**)",
-        "📦 阵地头寸": f"`{qty}` 张 (双向对冲体系)",
-        "⚙️ 双擎排单": f"保本重兵: `{fee_qty}`张@**`{fee_price:.2f}`** | 冲锋残兵: `{tp1_qty}`张@**`{tp1_price:.2f}`**",
+        "📦 动态头寸": f"`{qty}` 张 (20x 杠杆 | 双向对冲)",
+        "📏 波动参考": _gray(f"ATR = {atr:.4f}"),
+        "⚙️ 双擎排单": f"保本重兵: `{fee_qty}`张@**`{fee_price:.2f}`**\n\n  ➔ 冲锋残兵: `{tp1_qty}`张@**`{local_tp1:.2f}`** (TV:`{tv_tp1:.2f}`)",
         "📡 初始防守": _deep_purple("🟢 实盘核查：初始硬止损已隐身，双限价已强行铺设！")
     }, "#4B0082")
 
 def report_fee_cover_reached(side, entry_price, fee_cover_price, remaining_qty):
     send_alert("🛡️ 第一重达成：雷达激活护甲", {
         "触发方向": _green("多") if side == "LONG" else _red("空"),
-        "保本已触发": _green(f"**{fee_cover_price:.2f}** USDT (手续费已覆盖)"),
+        "保本已触发": _green(f"**{fee_cover_price:.2f}** USDT (手续费已安全落袋)"),
         "剩余冲锋头寸": f"`{remaining_qty}` 张",
         "实盘核查": _purple("✅ 确认突破，物理保本止损已挂至成本价！")
     }, "#8E44AD")
