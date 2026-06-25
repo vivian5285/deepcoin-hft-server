@@ -31,12 +31,12 @@ class PositionSupervisor:
         self.watched_entry = 0.0
         self.current_sl = 0.0
         
-        # 🚀 价格偏移滤网：同向信号差价 <= 7 美金时忽略
+        # 价格偏移滤网：同向信号差价 <= 7 美金时忽略
         self.price_diff_threshold = 7.0 
         self.last_protect_time = 0
 
         self.state_file = 'deepcoin_vps_state.json'
-        logger.info("🧠 深币 VPS [双向对冲+双擎保本版] 已加载：通信断层 Bug 已修复！")
+        logger.info("🧠 深币 VPS [双向对冲+智能动态拆分版] 已加载：恢复圣杯级测距分仓！")
 
     def _get_active_position(self):
         res = deepcoin_client.get_position_info(self.symbol)
@@ -51,7 +51,6 @@ class PositionSupervisor:
                     }
         return None
 
-    # ==================== 🚀 修复 API 通信入口 ====================
     def process_signal(self, payload):
         """兼容 app.py 中的 deepcoin_processor.process_signal 调用"""
         self.handle_signal(payload)
@@ -64,12 +63,10 @@ class PositionSupervisor:
         if not self._lock.acquire(blocking=False): return
 
         try:
-            # 1. 正常开仓/反转
             if raw_action in ["LONG", "SHORT"]:
                 self.last_tv_side = raw_action
                 self._handle_smart_entry(raw_action)
 
-            # 2. 🎯 TP3/各种平仓指令：真正执行对冲全平
             elif raw_action == "CLOSE_TP3":
                 self._handle_close_command("🎯 策略大波段(TP3)完结，深币同步清场")
 
@@ -91,7 +88,6 @@ class PositionSupervisor:
             logger.info(f"[{reason}] 指令到达，但深币实盘已无仓位 (可能已提前双擎止盈)。")
             dingtalk.report_deepcoin_clear(f"{reason} (深币已提前落袋空仓)")
 
-    # ==================== 🚀 智能同向滤网与开仓 ====================
     def _handle_smart_entry(self, action):
         current_pos = self._get_active_position()
         has_position = current_pos and current_pos.get('size', 0) > 0
@@ -148,9 +144,23 @@ class PositionSupervisor:
             else:
                 self.fee_cover_price = round(self.watched_entry * (1 - self.fee_cover_margin), 2)
 
-            # ==================== 🚀 双擎平仓法：手续费(60%) + TP1(40%) ====================
-            qty_fee = int(self.watched_qty * 0.6)
+            # ==================== 🚀 智能动态测距拆分 ====================
+            # 以美金绝对差价为判定标准：
+            # 如果 TP1 距离保本线 > 10美金，说明肉大，80%重兵保本；
+            # 如果距离 > 6美金，65%兵力保本；
+            # 如果距离极近(肉小)，50%对半分。
+            distance = abs(self.fee_cover_price - self.tv_tp1)
+            if distance > 10.0: 
+                fee_ratio = 0.80
+            elif distance > 6.0: 
+                fee_ratio = 0.65
+            else: 
+                fee_ratio = 0.50
+
+            qty_fee = int(self.watched_qty * fee_ratio)
             qty_tp1 = int(self.watched_qty) - qty_fee
+
+            logger.info(f"📐 [动态拆分] TP1距离保本线 ${distance:.2f} ➔ 分配比例: 手续费 {fee_ratio*100}% ({qty_fee}张), TP1 {100-fee_ratio*100}% ({qty_tp1}张)")
 
             close_side = "sell" if self.current_side == "LONG" else "buy"
             
@@ -188,7 +198,7 @@ class PositionSupervisor:
                 if self.current_side == "LONG" and curr_px >= self.fee_cover_price: reached = True
                 elif self.current_side == "SHORT" and curr_px <= self.fee_cover_price: reached = True
 
-                # ==================== 🚀 雷达激活：已过保本线，撤隐身挂条件止损 ====================
+                # 雷达激活：过保本线，挂条件止损
                 if reached and not self.radar_activated:
                     self.radar_activated = True
                     self.current_sl = self.watched_entry
@@ -202,7 +212,7 @@ class PositionSupervisor:
                         "ordType": "conditional", "sz": str(remaining_qty), "triggerPx": str(self.current_sl), "orderPx": "-1"
                     })
 
-                # ==================== 🚀 雷达追踪 ====================
+                # 雷达追踪
                 if self.radar_activated:
                     moved = False
                     if self.current_side == "LONG" and curr_px > self.current_sl:
@@ -278,6 +288,5 @@ class PositionSupervisor:
                 threading.Thread(target=self._radar_loop, daemon=True).start()
         except Exception as e: logger.error(f"灾备恢复失败: {e}")
 
-# ==================== 🚀 终极 Bug 修复：万能暴露 ====================
 position_supervisor = PositionSupervisor()
-deepcoin_processor = position_supervisor  # 增加别名暴露，完美兼容 app.py 的导入需求
+deepcoin_processor = position_supervisor
