@@ -38,7 +38,7 @@ def send_alert(title, data_dict, header_color="#4B0082"):
 
     markdown_text = f"""### <font color="{header_color}">{title}</font>
 > **⏱ 军区时间**：`{now_time}`  
-> **📍 阵地标识**：[ 中海资本 · 深币隐身雷达 v7.0 ]
+> **📍 阵地标识**：[ 中海资本 · 深币双擎雷达 v7.0 ]
 
 ---
 {body_text}
@@ -52,14 +52,22 @@ def send_alert(title, data_dict, header_color="#4B0082"):
 
 # ==================== 动作战报 ====================
 
-def report_deepcoin_open(side, entry_price, qty, fee_cover_price, tv_tp1):
+def report_deepcoin_open(side, entry_price, tv_price, qty, fee_cover_price, tv_tp1):
     side_str = _green("🟩 现价做多 (LONG)") if side == "LONG" else _red("🟥 现价做空 (SHORT)")
+    
+    # 🎯 精准滑点计算
+    if tv_price > 0:
+        slip = entry_price - tv_price if side == "LONG" else tv_price - entry_price
+        slip_txt = f"{slip:+.2f} 刀"
+    else:
+        slip_txt = "未知 (TV未传价)"
+
     data = {
         "🎛️ 潜伏方向": side_str,
-        "💰 进场均价": f"**`{entry_price:.2f}`** USDT",
+        "💰 进场均价": f"**`{entry_price:.2f}`** USDT (滑点: **{slip_txt}**)",
         "📦 阵地头寸": f"`{qty}` 张 (双向对冲体系)",
-        "⚙️ 双擎网格": f"保本单: **`{fee_cover_price:.2f}`** | TP1全平单: **`{tv_tp1:.2f}`**",
-        "📡 初始防守": _deep_purple("🟢 隐身状态：止损挂单已藏匿，等待突破保本线启动雷达...")
+        "⚙️ 双擎排单": f"保手续费: **`{fee_cover_price:.2f}`** | 终点 TV_TP1: **`{tv_tp1:.2f}`**",
+        "📡 初始防守": _deep_purple("🟢 实盘核查：初始硬止损已隐身，限价双擎已铺设！")
     }
     send_alert("🖨️ 战神入局：深币双擎建仓完毕", data, header_color="#4B0082")
 
@@ -73,7 +81,7 @@ def report_fee_cover_reached(side, entry_price, fee_cover_price, remaining_qty):
     }
     send_alert("🛡️ 第一重达成：雷达激活护甲", data, header_color="#8E44AD")
 
-def report_radar_move(side, new_sl, reason="锁利润"):
+def report_radar_move(side, new_sl):
     side_str = _green("多头") if side == "LONG" else _red("空头")
     data = {
         "追踪方向": side_str,
@@ -83,14 +91,18 @@ def report_radar_move(side, new_sl, reason="锁利润"):
     send_alert("📈 雷达捷报：锁润防线推升", data, header_color="#8E44AD")
 
 def report_deepcoin_clear(reason):
-    if "TP3" in reason or "自然归零" in reason or "落袋" in reason:
+    if "TP3" in reason or "归零" in reason or "自然止盈" in reason:
         title = "🏆 完美清场：利润与返佣双收"
         header_color = "#27AE60"
         color_reason = _green(f"**{reason}**")
-    elif "保护" in reason or "防守" in reason or "强制" in reason:
+    elif "保护" in reason or "防守" in reason:
         title = "🛡️ 战术撤退：保本防守触发"
         header_color = "#E67E22"
         color_reason = _orange(f"**{reason}**")
+    elif "人工" in reason or "违规" in reason:
+        title = "🛑 铁血截断：人工违规干预"
+        header_color = "#FF3333"
+        color_reason = _red(f"**{reason}**")
     else:
         title = "🧹 深币对冲阵地全平"
         header_color = "#7F8C8D"
@@ -106,7 +118,7 @@ def report_force_align(real_side, expected_side):
     send_alert("🚨 严重违纪 · 强行物理对齐", {
         "实盘方向": f"`{real_side}`",
         "TV期望方向": f"`{expected_side}`",
-        "处理结果": "**已执行强制反向市价平仓，强行对齐源头！**"
+        "处理结果": "**已执行强制反向对冲市价平仓，强行对齐源头！**"
     }, header_color="#FF0000")
 
 def report_system_alert(title, detail):
