@@ -18,7 +18,7 @@ class PositionSupervisor:
 
         self.leverage = 20
         self.face_value = 0.1
-        self.fee_cover_margin = 0.0014 # 覆盖手续费及微利
+        self.fee_cover_margin = 0.0014 # 保手续费安全距离
         
         self.radar_activated = False
         self.fee_cover_price = 0.0
@@ -31,37 +31,21 @@ class PositionSupervisor:
         self.watched_entry = 0.0
         self.current_sl = 0.0
         
-        # 同向信号差价 <= 7 美金时忽略
         self.price_diff_threshold = 7.0 
-        self.last_protect_time = 0
-
         self.state_file = 'deepcoin_vps_state.json'
-        logger.info("🧠 深币 VPS [精度锁死+爆破重试版] 已加载：解决张数报错与卡单！")
+        logger.info("🧠 深币 VPS [核武全平+精度锁死版] 已加载！")
 
     def _save_state(self):
-        state = {
-            "last_tv_side": self.last_tv_side,
-            "current_side": self.current_side,
-            "watched_qty": self.watched_qty,
-            "watched_entry": self.watched_entry,
-            "current_sl": self.current_sl,
-            "monitoring": self.monitoring
-        }
         try:
-            with open(self.state_file, 'w') as f: json.dump(state, f)
+            with open(self.state_file, 'w') as f: json.dump({"last_tv_side": self.last_tv_side, "watched_qty": self.watched_qty}, f)
         except: pass
 
     def _get_active_position(self):
         res = deepcoin_client.get_position_info(self.symbol)
         if res and 'data' in res:
             for p in res['data']:
-                size = int(p.get("pos", 0))
-                if size > 0:
-                    return {
-                        "size": size, 
-                        "entry_price": round(float(p.get("avgPx", p.get("price", 0))), 2), 
-                        "posSide": p.get("posSide", "long").lower()
-                    }
+                if int(p.get("pos", 0)) > 0:
+                    return {"size": int(p.get("pos")), "entry_price": round(float(p.get("avgPx", p.get("price", 0))), 2), "posSide": p.get("posSide", "long").lower()}
         return None
 
     def process_signal(self, payload):
@@ -69,14 +53,13 @@ class PositionSupervisor:
 
     def handle_signal(self, payload):
         raw_action = payload.get("action", "").upper()
-        # 🚀 强制锁定 2 位价格精度
         self.tv_tp1 = round(float(payload.get("tv_tp1", 0.0)), 2)
         self.tv_price = round(float(payload.get("price", 0.0)), 2)
 
         if not raw_action: return
-        
+        # 10秒排队机制，死防指令遗漏
         if not self._lock.acquire(timeout=10.0): 
-            logger.error("⚠️ 系统正忙，获取锁超时！")
+            logger.error("⚠️ 系统正忙，指令被丢弃！")
             return
 
         try:
@@ -91,61 +74,46 @@ class PositionSupervisor:
             elif raw_action.startswith("CLOSE_PROTECT"):
                 reason = raw_action.split("|")[1] if "|" in raw_action else "保护性全平"
                 self._handle_close_command(f"🛡️ 保护性全平: {reason}")
-
+                
             elif raw_action == "CLOSE":
-                reason = payload.get("reason", "TV 强制平仓")
-                self._handle_close_command(f"🧹 强制清仓: {reason}")
+                self._handle_close_command("🧹 强制清仓")
         finally:
             self._lock.release()
 
     def _handle_close_command(self, reason):
         pos = self._get_active_position()
-        if pos and pos.get('size', 0) > 0:
-            self._close_all(reason)
-        else:
-            logger.info(f"[{reason}] 指令到达，实盘已无仓位。")
-            dingtalk.report_deepcoin_clear(f"{reason} (深币已提前落袋空仓)", "✅ 提前安全空仓")
+        if pos and pos.get('size', 0) > 0: self._close_all(reason)
+        else: dingtalk.report_deepcoin_clear(f"{reason}", "✅ 提前安全空仓")
 
     def _handle_smart_entry(self, action):
         current_pos = self._get_active_position()
-        has_position = current_pos and current_pos.get('size', 0) > 0
         curr_px = deepcoin_client.get_current_price(self.symbol)
 
-        if not has_position:
-            deepcoin_client.force_cancel_all(self.symbol)
+        if not current_pos:
+            deepcoin_client.cancel_all_open_orders(self.symbol)
             self._open_position(action, curr_px)
             return
 
         current_side = "LONG" if current_pos["posSide"] == "long" else "SHORT"
-        avg_price = current_pos["entry_price"]
-
         if current_side == action:
-            diff = abs(curr_px - avg_price)
+            diff = abs(curr_px - current_pos["entry_price"])
             if diff <= self.price_diff_threshold:
-                logger.info(f"🛡️ [深币拦截] 同向差异 ${diff:.2f} ≤ ${self.price_diff_threshold}，防震荡忽略！")
+                logger.info("🛡️ [深币拦截] 震荡区间，防乱动忽略！")
                 return
             else:
-                logger.info(f"🔄 [深币换仓] 同向差异 ${diff:.2f} > ${self.price_diff_threshold}，执行先平后开！")
-                self._close_all("同方向大幅推移，更新阵地")
+                self._close_all("同方向推移，更新阵地")
                 time.sleep(1.2)
                 self._open_position(action, curr_px)
         else:
-            logger.info(f"⚔️ [深币反转] 收到反向信号，对冲先平后开")
-            self._close_all("反方向对冲换防")
+            self._close_all("反方向指令换防")
             time.sleep(1.2)
             self._open_position(action, curr_px)
 
     def _open_position(self, side, curr_px):
         if curr_px <= 0: return
+        qty = max(int((deepcoin_client.get_available_balance() * 0.28 * self.leverage) / (curr_px * self.face_value)), 1)
+        open_side, pos_side = ("buy", "long") if side == "LONG" else ("sell", "short")
 
-        balance = deepcoin_client.get_available_balance()
-        raw_qty = (balance * 0.28 * self.leverage) / (curr_px * self.face_value)
-        qty = max(int(raw_qty), 1)
-
-        open_side = "buy" if side == "LONG" else "sell"
-        pos_side = "long" if side == "LONG" else "short"
-
-        logger.info(f"🚀 [双向持仓] 开仓: {open_side} {qty}张 (轨号: {pos_side})")
         deepcoin_client.place_market_order(self.symbol, open_side, pos_side, qty)
         time.sleep(2.0)
 
@@ -158,33 +126,22 @@ class PositionSupervisor:
             self.radar_activated = False
             self._save_state()
             
-            # 🚀 精度锁死：计算保本价，保留 2 位小数
-            if self.current_side == "LONG":
-                self.fee_cover_price = round(self.watched_entry * (1 + self.fee_cover_margin), 2)
-            else:
-                self.fee_cover_price = round(self.watched_entry * (1 - self.fee_cover_margin), 2)
-
+            # 精度死锁 2 位小数
+            self.fee_cover_price = round(self.watched_entry * (1 + self.fee_cover_margin if side == "LONG" else 1 - self.fee_cover_margin), 2)
+            
+            # 动态分仓 + 张数兜底
             distance = abs(self.fee_cover_price - self.tv_tp1)
-            if distance > 10.0: fee_ratio = 0.80
-            elif distance > 6.0: fee_ratio = 0.65
-            else: fee_ratio = 0.50
-
-            # ==================== 🚀 绝对张数防报错保护 ====================
-            if self.watched_qty == 1:
-                # 只有1张，绝不能拆分，100%保手续费
-                qty_fee = 1
-                qty_tp1 = 0
+            fee_ratio = 0.80 if distance > 10.0 else (0.65 if distance > 6.0 else 0.50)
+            
+            if self.watched_qty == 1: qty_fee, qty_tp1 = 1, 0
             else:
-                qty_fee = int(self.watched_qty * fee_ratio)
-                qty_fee = max(qty_fee, 1)  # 至少派1张去保手续费
+                qty_fee = max(int(self.watched_qty * fee_ratio), 1)
                 qty_tp1 = self.watched_qty - qty_fee
 
-            close_side = "sell" if self.current_side == "LONG" else "buy"
+            close_side = "sell" if side == "LONG" else "buy"
             
-            if qty_fee > 0:
-                deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.fee_cover_price, qty_fee)
-            if qty_tp1 > 0 and self.tv_tp1 > 0:
-                deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.tv_tp1, qty_tp1)
+            if qty_fee > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.fee_cover_price, qty_fee, reduce_only=True) #[cite: 16]
+            if qty_tp1 > 0 and self.tv_tp1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.tv_tp1, qty_tp1, reduce_only=True) #[cite: 16]
 
             dingtalk.report_deepcoin_open(self.current_side, self.watched_entry, self.tv_price, self.watched_qty, qty_fee, self.fee_cover_price, qty_tp1, self.tv_tp1)
             self._start_radar_monitor()
@@ -200,131 +157,92 @@ class PositionSupervisor:
                 actual_qty = int(pos['size']) if pos else 0
                 actual_side = "LONG" if pos and pos.get('posSide') == "long" else "SHORT"
 
-                if actual_qty > 0 and actual_side != self.last_tv_side and actual_side in ["LONG", "SHORT"]:
+                if actual_qty > 0 and actual_side != self.last_tv_side:
                     self._close_all("强行对齐方向")
                     dingtalk.report_force_align(actual_side, self.last_tv_side)
                     break
 
                 if actual_qty == 0:
-                    if self.watched_qty > 0:
-                        self._close_all("🚨 仓位突然归零 (触发止盈或人工全平)")
-                    else:
-                        self.monitoring = False
+                    if self.watched_qty > 0: self._close_all("🚨 仓位突然归零")
+                    else: self.monitoring = False
                     break
 
                 if actual_qty > self.watched_qty:
-                    self._close_all("🚨 发现人工违规加仓，强制物理对冲全平！")
+                    self._close_all("🚨 人工违规加仓，强制对冲！")
                     break
 
                 if actual_qty < self.watched_qty:
-                    logger.info(f"✅ 仓位衰减 (保本单成交): {self.watched_qty} -> {actual_qty}")
                     self.watched_qty = actual_qty
                     self._save_state()
 
                 curr_px = deepcoin_client.get_current_price(self.symbol)
-                reached = False
-                if self.current_side == "LONG" and curr_px >= self.fee_cover_price: reached = True
-                elif self.current_side == "SHORT" and curr_px <= self.fee_cover_price: reached = True
+                reached = (self.current_side == "LONG" and curr_px >= self.fee_cover_price) or (self.current_side == "SHORT" and curr_px <= self.fee_cover_price)
 
                 if reached and not self.radar_activated:
                     self.radar_activated = True
                     self.current_sl = self.watched_entry
                     dingtalk.report_fee_cover_reached(self.current_side, self.watched_entry, self.fee_cover_price, actual_qty)
-
-                    close_side = "sell" if self.current_side == "LONG" else "buy"
-                    pos_side = "long" if self.current_side == "LONG" else "short"
-                    
-                    deepcoin_client._request("POST", "/trade/order-algo", {
-                        "instId": self.symbol, "tdMode": "cross", "side": close_side, "posSide": pos_side,
-                        "ordType": "conditional", "sz": str(actual_qty), "triggerPx": str(self.current_sl), "orderPx": "-1"
-                    })
+                    close_side, pos_side = ("sell", "long") if self.current_side == "LONG" else ("buy", "short")
+                    deepcoin_client._request("POST", "/trade/order-algo", {"instId": self.symbol, "tdMode": "cross", "side": close_side, "posSide": pos_side, "ordType": "conditional", "sz": str(actual_qty), "triggerPx": str(self.current_sl), "orderPx": "-1", "reduceOnly": True})
 
                 if self.radar_activated:
                     moved = False
                     if self.current_side == "LONG" and curr_px > self.current_sl:
                         new_sl = max(self.current_sl, curr_px * 0.994)
-                        if new_sl > self.current_sl + 0.8:
-                            self.current_sl = round(new_sl, 2)
-                            moved = True
+                        if new_sl > self.current_sl + 0.8: self.current_sl = round(new_sl, 2); moved = True
                     elif self.current_side == "SHORT" and curr_px < self.current_sl:
                         new_sl = min(self.current_sl, curr_px * 1.006)
-                        if new_sl < self.current_sl - 0.8:
-                            self.current_sl = round(new_sl, 2)
-                            moved = True
+                        if new_sl < self.current_sl - 0.8: self.current_sl = round(new_sl, 2); moved = True
 
                     if moved:
-                        deepcoin_client.force_cancel_all(self.symbol)
+                        deepcoin_client.cancel_all_open_orders(self.symbol)
                         time.sleep(0.3)
-                        close_side = "sell" if self.current_side == "LONG" else "buy"
-                        pos_side = "long" if self.current_side == "LONG" else "short"
-                        
-                        if self.tv_tp1 > 0:
-                            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.tv_tp1, actual_qty)
+                        close_side, pos_side = ("sell", "long") if self.current_side == "LONG" else ("buy", "short")
+                        if self.tv_tp1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.tv_tp1, actual_qty, reduce_only=True) #[cite: 16]
+                        res = deepcoin_client._request("POST", "/trade/order-algo", {"instId": self.symbol, "tdMode": "cross", "side": close_side, "posSide": pos_side, "ordType": "conditional", "sz": str(actual_qty), "triggerPx": str(self.current_sl), "orderPx": "-1", "reduceOnly": True})
+                        if res and str(res.get("code", "")) == "0": dingtalk.report_radar_move(self.current_side, self.current_sl)
 
-                        res = deepcoin_client._request("POST", "/trade/order-algo", {
-                            "instId": self.symbol, "tdMode": "cross", "side": close_side, "posSide": pos_side,
-                            "ordType": "conditional", "sz": str(actual_qty), "triggerPx": str(self.current_sl), "orderPx": "-1"
-                        })
-                        if res and str(res.get("code", "")) == "0":
-                            dingtalk.report_radar_move(self.current_side, self.current_sl)
-
-            except Exception as e:
-                logger.error(f"雷达异常: {e}")
+            except Exception as e: logger.error(f"雷达异常: {e}")
             time.sleep(3.5)
 
-    # ==================== 🚀 循环爆破式全平机制 ====================
+    # 🚀 5 轮核弹全平机制，带有无敌的 reduce_only 护甲！
     def _close_all(self, reason=""):
-        deepcoin_client.force_cancel_all(self.symbol)
-        time.sleep(0.5)
-        
-        # 允许最多 3 次循环对冲查杀
-        for attempt in range(3):
+        logger.warning(f"🔨 启动核武级全平: {reason}")
+        for attempt in range(5): #[cite: 16]
+            deepcoin_client.cancel_all_open_orders(self.symbol)
+            time.sleep(0.6)
             pos = self._get_active_position()
-            if not pos or pos.get('size', 0) == 0:
-                break # 已经平完
+            if not pos or pos.get('size', 0) == 0: break
                 
             qty = int(pos['size'])
             pos_side = pos['posSide'] 
             close_side = "sell" if pos_side == "long" else "buy"
             
-            logger.info(f"🔨 [双向对冲] 第 {attempt+1} 次物理全平: {close_side} {qty}张 (轨号: {pos_side})")
-            deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty)
-            time.sleep(1.2) # 给交易所撮合时间
+            logger.info(f"🔨 第 {attempt+1} 次物理全平: {close_side} {qty}张")
+            deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty, reduce_only=True) #[cite: 16]
+            time.sleep(1.5)
                 
-        deepcoin_client.force_cancel_all(self.symbol) # 最后扫尾
-        
+        deepcoin_client.cancel_all_open_orders(self.symbol) 
         final_pos = self._get_active_position()
-        self.monitoring = False
-        self.radar_activated = False
-        self.watched_qty = 0
+        self.monitoring, self.radar_activated, self.watched_qty = False, False, 0
         self._save_state()
         
-        # 终极钉钉报告
         if not final_pos or final_pos.get('size', 0) == 0:
-            logger.info(f"[全平核查通过] {reason}")
-            if reason: dingtalk.report_deepcoin_clear(reason, "✅ 100% 物理归零成功")
+            if reason: dingtalk.report_deepcoin_clear(reason, "✅ 5轮核武器全平成功") #[cite: 16]
         else:
-            rem_qty = final_pos.get('size')
-            dingtalk.report_system_alert("⚠️ 清仓不彻底", f"已执行3次爆破对冲，仍有残留: {rem_qty} 张，请立即手工介入！")
+            dingtalk.report_system_alert("⚠️ 清仓失败", f"已执行5次爆破对冲，仍有残留: {final_pos.get('size')} 张，建议人工介入！") #[cite: 16]
 
     def recover_state_on_startup(self):
         try:
             if os.path.exists(self.state_file):
-                with open(self.state_file, 'r') as f:
-                    saved_state = json.load(f)
-                    self.last_tv_side = saved_state.get("last_tv_side")
-                    
+                with open(self.state_file, 'r') as f: self.last_tv_side = json.load(f).get("last_tv_side")
             pos = self._get_active_position()
             if pos and pos['size'] > 0:
                 self.current_side = "LONG" if pos.get('posSide') == "long" else "SHORT"
                 if not self.last_tv_side: self.last_tv_side = self.current_side
-                self.initial_qty = pos['size']
-                self.watched_qty = self.initial_qty
-                self.watched_entry = pos['entry_price']
-                self.monitoring = True
-                logger.info("🔄 灾备自愈：哨兵雷达已强行接管双向持仓实盘！")
+                self.watched_qty, self.watched_entry, self.monitoring = pos['size'], pos['entry_price'], True
                 threading.Thread(target=self._radar_loop, daemon=True).start()
-        except Exception as e: logger.error(f"灾备恢复失败: {e}")
+        except: pass
 
 position_supervisor = PositionSupervisor()
 deepcoin_processor = position_supervisor
