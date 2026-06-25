@@ -18,10 +18,10 @@ class PositionSupervisor:
 
         # 深币专属：动态四档资金利用率 & TP1 乘数
         self.regime_settings = {
-            1: {"margin": 0.15, "tp1_m": 0.75}, # 极弱波段：15%仓位，跑得快
-            2: {"margin": 0.25, "tp1_m": 1.10}, # 弱势推升：25%仓位，标准止盈
-            3: {"margin": 0.35, "tp1_m": 1.30}, # 中势单边：35%仓位，利润拉大
-            4: {"margin": 0.50, "tp1_m": 1.55}  # 强势主升：50%重仓，吃满趋势
+            1: {"margin": 0.15, "tp1_m": 0.75}, # 极弱波段：15%仓位
+            2: {"margin": 0.25, "tp1_m": 1.10}, # 弱势推升：25%仓位
+            3: {"margin": 0.35, "tp1_m": 1.30}, # 中势单边：35%仓位
+            4: {"margin": 0.50, "tp1_m": 1.55}  # 强势主升：50%仓位
         }
 
         self.leverage = 20
@@ -43,9 +43,9 @@ class PositionSupervisor:
         self.watched_entry = 0.0
         self.current_sl = 0.0
         
-        self.price_diff_threshold = 7.0 
+        # 🚀 V9.0：已彻底废除 price_diff_threshold (7美金滤网)，开启极致刷佣模式
         self.state_file = 'deepcoin_vps_state.json'
-        logger.info("🧠 深币 VPS [V8.0 参数自治版] 已加载：VPS完全夺回仓位与TP1定价权！")
+        logger.info("🧠 深币 VPS [V9.0 极致刷佣版] 已加载：取消差价滤网，同反向一律先平后开！")
 
     def _save_state(self):
         try:
@@ -107,34 +107,33 @@ class PositionSupervisor:
         if pos and pos.get('size', 0) > 0: self._close_all(reason)
         else: dingtalk.report_deepcoin_clear(f"{reason}", "✅ 提前安全空仓")
 
+    # ==================== 🚀 V9.0 极致刷佣入场逻辑 ====================
     def _handle_smart_entry(self, action):
         current_pos = self._get_active_position()
         curr_px = deepcoin_client.get_current_price(self.symbol)
 
-        if not current_pos:
-            deepcoin_client.cancel_all_open_orders(self.symbol)
-            self._open_position(action, curr_px)
-            return
-
-        current_side = "LONG" if current_pos["posSide"] == "long" else "SHORT"
-        if current_side == action:
-            diff = abs(curr_px - current_pos["entry_price"])
-            if diff <= self.price_diff_threshold:
-                logger.info("🛡️ [深币拦截] 震荡区间，防乱动忽略！")
-                return
+        if current_pos and current_pos.get('size', 0) > 0:
+            current_side = "LONG" if current_pos["posSide"] == "long" else "SHORT"
+            
+            # 🚀 取消滤网：无论是同向还是反向，只要有仓位，一律直接核弹全平！
+            if current_side == action:
+                logger.info(f"🔄 [极致刷佣] 收到同向信号，强制平旧开新，刷新挂单！")
+                self._close_all("同方向刷新阵地 (高频刷佣模式)")
             else:
-                self._close_all("同方向大幅推移，更新阵地")
-                time.sleep(1.2)
-                self._open_position(action, curr_px)
+                logger.info(f"⚔️ [深币反转] 收到反向信号，对冲先平后开")
+                self._close_all("反方向指令到达，对冲换防")
+            
+            time.sleep(1.2) # 等待资金释放与防线归零
         else:
-            self._close_all("反方向指令到达，对冲换防")
-            time.sleep(1.2)
-            self._open_position(action, curr_px)
+            # 如果是空仓状态，保险起见扫荡一次幽灵单再开仓
+            deepcoin_client.cancel_all_open_orders(self.symbol)
+
+        # 永远一手：旧单死干净了，才开新单
+        self._open_position(action, curr_px)
 
     def _open_position(self, side, curr_px):
         if curr_px <= 0: return
         
-        # 🚀 提取深币 VPS 内置的动态仓位比例
         dynamic_margin = self.regime_settings[self.regime]["margin"]
         raw_qty = (deepcoin_client.get_available_balance() * dynamic_margin * self.leverage) / (curr_px * self.face_value)
         qty = max(int(raw_qty), 1)
@@ -152,7 +151,6 @@ class PositionSupervisor:
             self.current_sl = self.watched_entry
             self.radar_activated = False
             
-            # 🚀 提取深币 VPS 内置的 TP1 乘数，亲手计算实盘 TP1
             tp1_m = self.regime_settings[self.regime]["tp1_m"]
             
             if self.current_side == "LONG":
@@ -164,11 +162,9 @@ class PositionSupervisor:
                 
             self._save_state()
 
-            # 动态测距分仓 (使用本地计算的 local_tp1 做尺子)
             distance = abs(self.fee_cover_price - self.local_tp1)
             fee_ratio = 0.80 if distance > 10.0 else (0.65 if distance > 6.0 else 0.50)
             
-            # 绝对张数防错兜底
             if self.watched_qty == 1: qty_fee, qty_tp1 = 1, 0
             else:
                 qty_fee = max(int(self.watched_qty * fee_ratio), 1)
@@ -176,6 +172,7 @@ class PositionSupervisor:
 
             close_side = "sell" if side == "LONG" else "buy"
             
+            # 严格带有 reduce_only 的护甲级限价挂单
             if qty_fee > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.fee_cover_price, qty_fee, reduce_only=True)
             if qty_tp1 > 0 and self.local_tp1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.local_tp1, qty_tp1, reduce_only=True)
 
@@ -234,7 +231,6 @@ class PositionSupervisor:
                         deepcoin_client.cancel_all_open_orders(self.symbol)
                         time.sleep(0.3)
                         close_side, pos_side = ("sell", "long") if self.current_side == "LONG" else ("buy", "short")
-                        # 🚀 锁润后，剩余冲锋残兵依然挂在本地计算的 local_tp1 上
                         if self.local_tp1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.local_tp1, actual_qty, reduce_only=True)
                         res = deepcoin_client._request("POST", "/trade/order-algo", {"instId": self.symbol, "tdMode": "cross", "side": close_side, "posSide": pos_side, "ordType": "conditional", "sz": str(actual_qty), "triggerPx": str(self.current_sl), "orderPx": "-1", "reduceOnly": True})
                         if res and str(res.get("code", "")) == "0": dingtalk.report_radar_move(self.current_side, self.current_sl)
@@ -273,7 +269,7 @@ class PositionSupervisor:
                 with open(self.state_file, 'r') as f:
                     s = json.load(f)
                     self.last_tv_side = s.get("last_tv_side")
-                    self.local_tp1 = s.get("local_tp1", 0.0) # 灾备恢复本地计算的TP1
+                    self.local_tp1 = s.get("local_tp1", 0.0) 
             pos = self._get_active_position()
             if pos and pos['size'] > 0:
                 self.current_side = "LONG" if pos.get('posSide') == "long" else "SHORT"
