@@ -52,10 +52,10 @@ def send_alert(title, data_dict, header_color="#4B0082"):
 
 # ==================== 动作战报 ====================
 
-def report_deepcoin_open(side, entry_price, tv_price, qty, fee_cover_price, tv_tp1):
+def report_deepcoin_open(side, entry_price, tv_price, qty, fee_qty, fee_price, tp1_qty, tp1_price):
     side_str = _green("🟩 现价做多 (LONG)") if side == "LONG" else _red("🟥 现价做空 (SHORT)")
     
-    # 🎯 精准滑点计算
+    # 精准滑点计算
     if tv_price > 0:
         slip = entry_price - tv_price if side == "LONG" else tv_price - entry_price
         slip_txt = f"{slip:+.2f} 刀"
@@ -66,8 +66,8 @@ def report_deepcoin_open(side, entry_price, tv_price, qty, fee_cover_price, tv_t
         "🎛️ 潜伏方向": side_str,
         "💰 进场均价": f"**`{entry_price:.2f}`** USDT (滑点: **{slip_txt}**)",
         "📦 阵地头寸": f"`{qty}` 张 (双向对冲体系)",
-        "⚙️ 双擎排单": f"保手续费: **`{fee_cover_price:.2f}`** | 终点 TV_TP1: **`{tv_tp1:.2f}`**",
-        "📡 初始防守": _deep_purple("🟢 实盘核查：初始硬止损已隐身，限价双擎已铺设！")
+        "⚙️ 双擎排单": f"保本重兵: `{fee_qty}`张@**`{fee_price:.2f}`** | 冲锋残兵: `{tp1_qty}`张@**`{tp1_price:.2f}`**",
+        "📡 初始防守": _deep_purple("🟢 实盘核查：初始硬止损已隐身，双限价已强行铺设！")
     }
     send_alert("🖨️ 战神入局：深币双擎建仓完毕", data, header_color="#4B0082")
 
@@ -75,7 +75,7 @@ def report_fee_cover_reached(side, entry_price, fee_cover_price, remaining_qty):
     side_str = _green("多") if side == "LONG" else _red("空")
     data = {
         "触发方向": side_str,
-        "保本已触发": _green(f"**{fee_cover_price:.2f}** USDT (手续费已安全覆盖)"),
+        "保本已触发": _green(f"**{fee_cover_price:.2f}** USDT (手续费与微利已安全覆盖)"),
         "剩余冲锋头寸": f"`{remaining_qty}` 张",
         "实盘核查": _purple("✅ 确认突破，雷达物理保本止损已挂至成本价！")
     }
@@ -90,7 +90,7 @@ def report_radar_move(side, new_sl):
     }
     send_alert("📈 雷达捷报：锁润防线推升", data, header_color="#8E44AD")
 
-def report_deepcoin_clear(reason):
+def report_deepcoin_clear(reason, status_msg):
     if "TP3" in reason or "归零" in reason or "自然止盈" in reason:
         title = "🏆 完美清场：利润与返佣双收"
         header_color = "#27AE60"
@@ -110,7 +110,7 @@ def report_deepcoin_clear(reason):
 
     data = {
         "触发原因": color_reason,
-        "实盘核查": "**✅ API 确认：反向对冲完成，所有挂单已撤销，双向仓位物理归零！**"
+        "核查结果": f"**{status_msg}**"
     }
     send_alert(title, data, header_color=header_color)
 
