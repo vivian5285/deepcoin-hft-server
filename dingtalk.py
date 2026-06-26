@@ -30,7 +30,8 @@ def send_alert(title, data_dict, header_color="#4B0082"):
     signed_url = _get_signed_url()
     if not signed_url: return
     body_text = "\n".join([f"- **{k}**: {v}" for k, v in data_dict.items()])
-    markdown_text = f"### <font color=\"{header_color}\">{title}</font>\n> **⏱ 军区时间**：`{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  \n> **📍 阵地标识**：[ 中海资本 · 深币双擎雷达 v8.0 ]\n\n---\n{body_text}\n\n---\n*🖨️ Quant AI · 深币紫金高频印钞机*"
+    # 🚀 在这里把名字改成了霸气的 V9.3 战前终极防线版！
+    markdown_text = f"### <font color=\"{header_color}\">{title}</font>\n> **⏱ 军区时间**：`{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  \n> **📍 阵地标识**：[ 中海资本 · 深币双擎雷达 V9.3 终极防线版 ]\n\n---\n{body_text}\n\n---\n*🖨️ Quant AI · 深币紫金高频印钞机*"
     try: requests.post(signed_url, json={"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}, timeout=6)
     except Exception as e: logger.error(f"钉钉发送失败: {e}")
 
@@ -58,9 +59,9 @@ def report_deepcoin_open(side, regime, atr, entry_price, tv_price, qty, fee_qty,
 def report_fee_cover_reached(side, entry_price, fee_cover_price, remaining_qty):
     send_alert("🛡️ 第一重达成：雷达激活护甲", {
         "触发方向": _green("多") if side == "LONG" else _red("空"),
-        "保本已触发": _green(f"**{fee_cover_price:.2f}** USDT (手续费已安全落袋)"),
+        "保本已触发": _green(f"**{fee_cover_price:.2f}** USDT (手续费与微利已安全覆盖)"),
         "剩余冲锋头寸": f"`{remaining_qty}` 张",
-        "实盘核查": _purple("✅ 确认突破，物理保本止损已挂至成本价！")
+        "实盘核查": _purple("✅ 确认突破，雷达物理保本止损已挂至成本价！")
     }, "#8E44AD")
 
 def report_radar_move(side, new_sl):
