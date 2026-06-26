@@ -38,6 +38,25 @@ class DeepcoinClient:
             logger.error(f"Deepcoin 请求失败 {endpoint}: {e}")
             return None
 
+    # ================= 🚀 V9.2 新增：智能安全撤单器 (Rate Limit 防护) =================
+    def _safe_cancel(self, endpoint, params):
+        res = self._request("POST", endpoint, params)
+        if res and str(res.get("code", "")) != "0":
+            msg = str(res.get("msg", "")).lower() + str(res.get("sMsg", "")).lower()
+            # 1. 频率限制保护
+            if "too many" in msg or "limit" in msg or "frequent" in msg:
+                logger.warning(f"⚠️ [频率限制] 触发 Deepcoin Rate Limit，系统退避休眠 1.5 秒... | 详情: {msg}")
+                time.sleep(1.5)
+                # 触发限频后重试一次
+                self._request("POST", endpoint, params)
+            # 2. 正常失败忽略 (订单已成交、不存在等)
+            elif "not exist" in msg or "not found" in msg or "already" in msg or "no order" in msg:
+                pass # 静默处理，避免污染日志
+            # 3. 真正的未知异常
+            else:
+                logger.warning(f"❌ [异常撤单] Endpoint: {endpoint} | Params: {params} | Resp: {res}")
+        return res
+
     def get_available_balance(self, ccy="USDT"):
         res = self._request("GET", "/account/balances", {"instType": "SWAP"})
         if isinstance(res, dict) and "data" in res:
@@ -64,28 +83,32 @@ class DeepcoinClient:
         if reduce_only: params["reduceOnly"] = True
         return self._request("POST", "/trade/order", params)
 
-    # 🚀 V9.1 终极版四重撤单：加入 Trigger 触发单双保险
+    # 🚀 V9.2 终极版：套用智能安全撤单器，告别满屏报错
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
         try:
             # 1. 批量高级撤单
-            self._request("POST", "/trade/cancel-batch-orders", {"instId": symbol})
-            self._request("POST", "/trade/cancel-algos", {"instId": symbol})
+            self._safe_cancel("/trade/cancel-batch-orders", {"instId": symbol})
+            self._safe_cancel("/trade/cancel-algos", {"instId": symbol})
             time.sleep(0.3)
+            
             # 2. 逐点猎杀普通限价单
             pending = self._request("GET", "/trade/orders-pending", {"instType": "SWAP", "instId": symbol})
             if pending and 'data' in pending:
                 for ord in pending['data']:
-                    if ord.get("ordId"): self._request("POST", "/trade/cancel-order", {"instId": symbol, "ordId": ord.get("ordId")})
+                    if ord.get("ordId"): self._safe_cancel("/trade/cancel-order", {"instId": symbol, "ordId": ord.get("ordId")})
+                    
             # 3. 逐点猎杀 Algo 条件单
             pending_algos = self._request("GET", "/trade/orders-algo-pending", {"instType": "SWAP", "instId": symbol})
             if pending_algos and 'data' in pending_algos:
                 for algo in pending_algos['data']:
-                    if algo.get("algoId"): self._request("POST", "/trade/cancel-algos", {"instId": symbol, "algoId": algo.get("algoId")})
-            # 4. 🚀 逐点猎杀 Trigger 触发单 (Grok 建议的双保险)
+                    if algo.get("algoId"): self._safe_cancel("/trade/cancel-algos", {"instId": symbol, "algoId": algo.get("algoId")})
+                    
+            # 4. 逐点猎杀 Trigger 触发单
             trigger_pending = self._request("GET", "/trade/trigger-orders-pending", {"instType": "SWAP", "instId": symbol})
             if trigger_pending and 'data' in trigger_pending:
                 for t_ord in trigger_pending['data']:
-                    if t_ord.get("ordId"): self._request("POST", "/trade/cancel-trigger-order", {"instId": symbol, "ordId": t_ord.get("ordId")})
-        except Exception as e: logger.error(f"撤单异常: {e}")
+                    if t_ord.get("ordId"): self._safe_cancel("/trade/cancel-trigger-order", {"instId": symbol, "ordId": t_ord.get("ordId")})
+        except Exception as e: 
+            logger.error(f"撤单巡检异常: {e}")
 
 deepcoin_client = DeepcoinClient()
