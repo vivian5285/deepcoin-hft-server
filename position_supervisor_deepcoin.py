@@ -44,7 +44,7 @@ class PositionSupervisor:
         self.current_sl = 0.0
         
         self.state_file = 'deepcoin_vps_state.json'
-        logger.info("🧠 深币 VPS [V9.2 终极防爆刷佣版] 已加载：雷达已加锁，完全免疫竞态撞车，新号必平！")
+        logger.info("🧠 深币 VPS [V9.3 战前终极防线版] 已加载：入场前三重扫荡，杜绝一切残留！")
 
     def _save_state(self):
         try:
@@ -107,12 +107,30 @@ class PositionSupervisor:
 
         if current_pos and current_pos.get('size', 0) > 0:
             current_side = "LONG" if current_pos["posSide"] == "long" else "SHORT"
-            # 🚀 取消同向滤网：无论是同向还是反向，一律先平后开，极致刷佣！
+            # 无论是同向还是反向，一律先平后开，极致刷佣
             if current_side == action: self._close_all("同方向刷新阵地 (高频刷佣模式)")
             else: self._close_all("反方向指令到达，对冲换防")
             time.sleep(1.2)
         else:
             deepcoin_client.cancel_all_open_orders(self.symbol)
+
+        # ==================== 🛡️ 战前终极净空核查 (Grok 防线增强版) ====================
+        logger.info("🛡️ [战前自检] 正在核查阵地是否 100% 净空...")
+        for attempt in range(3):
+            pos = self._get_active_position()
+            if not pos or int(pos.get('size', 0)) == 0:
+                break # 已经完全干净，可以安全开仓
+                
+            qty = int(pos['size'])
+            pos_side = pos['posSide']
+            close_side = "sell" if pos_side == "long" else "buy"
+            
+            logger.warning(f"⚠️ [开仓前警报] 发现顽固残留 {qty} 张，执行战前强制抹杀 (第{attempt+1}次)！")
+            deepcoin_client.cancel_all_open_orders(self.symbol)
+            time.sleep(0.3)
+            deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty, reduce_only=True)
+            time.sleep(1.2)
+        # =================================================================================
 
         self._open_position(action, curr_px)
 
@@ -134,7 +152,7 @@ class PositionSupervisor:
             self.current_sl = self.watched_entry
             self.radar_activated = False
             
-            # 🚀 本地亲自计算 TP1 价格
+            # 本地亲自计算 TP1 价格
             tp1_m = self.regime_settings[self.regime]["tp1_m"]
             if self.current_side == "LONG":
                 self.local_tp1 = round(self.watched_entry + self.current_atr * tp1_m, 2)
@@ -169,7 +187,7 @@ class PositionSupervisor:
     def _radar_loop(self):
         while self.monitoring:
             try:
-                # 🚀 雷达获取互斥锁，避免和 Webhook 主线程指令撞车
+                # 雷达获取互斥锁，避免和 Webhook 主线程指令撞车
                 if not self._lock.acquire(timeout=2.0):
                     time.sleep(1.0)
                     continue
@@ -230,7 +248,6 @@ class PositionSupervisor:
             except Exception as e: logger.error(f"雷达异常: {e}")
             time.sleep(3.5)
 
-    # ==================== 🚀 V9.2 智能重试核武清场 ====================
     def _close_all(self, reason=""):
         logger.warning(f"🔨 启动核武级全平: {reason}")
         
