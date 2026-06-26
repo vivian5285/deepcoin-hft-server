@@ -24,26 +24,15 @@ class DeepcoinClient:
         return base64.b64encode(h.digest()).decode('utf-8')
 
     def _request(self, method: str, endpoint: str, params: dict = None):
-        if not self.api_key or not self.secret_key:
-            return None
-        if not endpoint.startswith("/deepcoin/"): 
-            endpoint = "/deepcoin" + (endpoint if endpoint.startswith("/") else "/" + endpoint)
-            
+        if not self.api_key or not self.secret_key: return None
+        if not endpoint.startswith("/deepcoin/"): endpoint = "/deepcoin" + (endpoint if endpoint.startswith("/") else "/" + endpoint)
         timestamp = self._get_timestamp()
         body_str = json.dumps(params, separators=(',', ':')) if params and method.upper() != "GET" else ""
         request_path = f"{endpoint}?{'&'.join([f'{k}={v}' for k, v in params.items()])}" if method.upper() == "GET" and params else endpoint
         signature = self._sign(timestamp, method, request_path, body_str)
-        
-        headers = {
-            "Content-Type": "application/json", 
-            "DC-ACCESS-KEY": self.api_key,
-            "DC-ACCESS-SIGN": signature, 
-            "DC-ACCESS-TIMESTAMP": timestamp,
-            "DC-ACCESS-PASSPHRASE": self.passphrase
-        }
+        headers = {"Content-Type": "application/json", "DC-ACCESS-KEY": self.api_key, "DC-ACCESS-SIGN": signature, "DC-ACCESS-TIMESTAMP": timestamp, "DC-ACCESS-PASSPHRASE": self.passphrase}
         try:
-            url = f"{self.base_url}{request_path}"
-            resp = requests.request(method.upper(), url, data=body_str if body_str else None, headers=headers, timeout=10)
+            resp = requests.request(method.upper(), f"{self.base_url}{request_path}", data=body_str if body_str else None, headers=headers, timeout=10)
             return resp.json()
         except Exception as e: 
             logger.error(f"Deepcoin 请求失败 {endpoint}: {e}")
@@ -59,48 +48,44 @@ class DeepcoinClient:
         return 0.0
 
     def get_current_price(self, symbol="ETH-USDT-SWAP"):
-        try:
-            binance_symbol = symbol.split("-")[0] + "USDT" 
-            res = requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={binance_symbol}", timeout=5)
-            return float(res.json().get("price", 0.0))
+        try: return float(requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol.split('-')[0]}USDT", timeout=5).json().get("price", 0.0))
         except: return 0.0
 
     def get_position_info(self, symbol="ETH-USDT-SWAP"):
         return self._request("GET", "/account/positions", {"instType": "SWAP", "instId": symbol})
 
-    # 🚀 极其关键：支持 reduce_only 护甲
     def place_market_order(self, symbol, side, pos_side, qty, reduce_only=False):
-        params = {
-            "instId": symbol, "tdMode": "cross", "side": side, "posSide": pos_side,
-            "ordType": "market", "sz": str(int(qty)), "mrgPosition": "merge"
-        }
-        if reduce_only: params["reduceOnly"] = True #
+        params = {"instId": symbol, "tdMode": "cross", "side": side, "posSide": pos_side, "ordType": "market", "sz": str(int(qty)), "mrgPosition": "merge"}
+        if reduce_only: params["reduceOnly"] = True
         return self._request("POST", "/trade/order", params)
 
     def place_limit_order(self, symbol, side, pos_side, px, qty, reduce_only=False):
-        params = {
-            "instId": symbol, "tdMode": "cross", "side": side, "posSide": pos_side,
-            "ordType": "limit", "sz": str(int(qty)), "px": str(px), "mrgPosition": "merge"
-        }
-        if reduce_only: params["reduceOnly"] = True #[cite: 16]
+        params = {"instId": symbol, "tdMode": "cross", "side": side, "posSide": pos_side, "ordType": "limit", "sz": str(int(qty)), "px": str(px), "mrgPosition": "merge"}
+        if reduce_only: params["reduceOnly"] = True
         return self._request("POST", "/trade/order", params)
 
-    # 🚀 极其关键：双轨绝杀撤单（同步猎杀 Algo 条件单和普通限价单）
+    # 🚀 V9.1 终极版四重撤单：加入 Trigger 触发单双保险
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
         try:
+            # 1. 批量高级撤单
             self._request("POST", "/trade/cancel-batch-orders", {"instId": symbol})
             self._request("POST", "/trade/cancel-algos", {"instId": symbol})
             time.sleep(0.3)
-            # 逐点猎杀普通限价单
+            # 2. 逐点猎杀普通限价单
             pending = self._request("GET", "/trade/orders-pending", {"instType": "SWAP", "instId": symbol})
             if pending and 'data' in pending:
                 for ord in pending['data']:
                     if ord.get("ordId"): self._request("POST", "/trade/cancel-order", {"instId": symbol, "ordId": ord.get("ordId")})
-            # 逐点猎杀条件止损单[cite: 16]
+            # 3. 逐点猎杀 Algo 条件单
             pending_algos = self._request("GET", "/trade/orders-algo-pending", {"instType": "SWAP", "instId": symbol})
             if pending_algos and 'data' in pending_algos:
                 for algo in pending_algos['data']:
                     if algo.get("algoId"): self._request("POST", "/trade/cancel-algos", {"instId": symbol, "algoId": algo.get("algoId")})
+            # 4. 🚀 逐点猎杀 Trigger 触发单 (Grok 建议的双保险)
+            trigger_pending = self._request("GET", "/trade/trigger-orders-pending", {"instType": "SWAP", "instId": symbol})
+            if trigger_pending and 'data' in trigger_pending:
+                for t_ord in trigger_pending['data']:
+                    if t_ord.get("ordId"): self._request("POST", "/trade/cancel-trigger-order", {"instId": symbol, "ordId": t_ord.get("ordId")})
         except Exception as e: logger.error(f"撤单异常: {e}")
 
 deepcoin_client = DeepcoinClient()
