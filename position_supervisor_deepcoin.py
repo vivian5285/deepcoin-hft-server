@@ -18,10 +18,10 @@ class PositionSupervisor:
 
         # 🚀 夺回参数定价权：动态四档资金利用率 & 本地 TP1 乘数
         self.regime_settings = {
-            1: {"margin": 0.15, "tp1_m": 0.75}, # 极弱波段：15%仓位
-            2: {"margin": 0.25, "tp1_m": 1.10}, # 弱势推升：25%仓位
-            3: {"margin": 0.35, "tp1_m": 1.30}, # 中势单边：35%仓位
-            4: {"margin": 0.50, "tp1_m": 1.55}  # 强势主升：50%仓位
+            1: {"margin": 0.15, "tp1_m": 0.75}, 
+            2: {"margin": 0.25, "tp1_m": 1.10}, 
+            3: {"margin": 0.35, "tp1_m": 1.30}, 
+            4: {"margin": 0.50, "tp1_m": 1.55}  
         }
 
         self.leverage = 20
@@ -30,11 +30,11 @@ class PositionSupervisor:
         
         self.radar_activated = False
         self.fee_cover_price = 0.0
-        self.local_tp1 = 0.0  # VPS自己算出来的实盘 TP1
+        self.local_tp1 = 0.0  
         
         self.regime = 3
         self.current_atr = 30.0
-        self.tv_tp1 = 0.0     # TV传的，仅作播报对比
+        self.tv_tp1 = 0.0     
         self.tv_price = 0.0
 
         self.current_side = None
@@ -44,7 +44,7 @@ class PositionSupervisor:
         self.current_sl = 0.0
         
         self.state_file = 'deepcoin_vps_state.json'
-        logger.info("🧠 深币 VPS [V9.3 战前终极防线版] 已加载：入场前三重扫荡，杜绝一切残留！")
+        logger.info("🧠 深币 VPS [V9.4 智能识破版] 已加载：双重触发防漏报，仓位减少即刻保本！")
 
     def _save_state(self):
         try:
@@ -77,7 +77,6 @@ class PositionSupervisor:
 
         if not raw_action: return
         
-        # 获取最高执行权限，排队等待雷达释放锁
         if not self._lock.acquire(timeout=10.0): 
             logger.error("⚠️ 系统正忙，指令获取锁超时被丢弃！")
             return
@@ -107,19 +106,17 @@ class PositionSupervisor:
 
         if current_pos and current_pos.get('size', 0) > 0:
             current_side = "LONG" if current_pos["posSide"] == "long" else "SHORT"
-            # 无论是同向还是反向，一律先平后开，极致刷佣
             if current_side == action: self._close_all("同方向刷新阵地 (高频刷佣模式)")
             else: self._close_all("反方向指令到达，对冲换防")
             time.sleep(1.2)
         else:
             deepcoin_client.cancel_all_open_orders(self.symbol)
 
-        # ==================== 🛡️ 战前终极净空核查 (Grok 防线增强版) ====================
         logger.info("🛡️ [战前自检] 正在核查阵地是否 100% 净空...")
         for attempt in range(3):
             pos = self._get_active_position()
             if not pos or int(pos.get('size', 0)) == 0:
-                break # 已经完全干净，可以安全开仓
+                break 
                 
             qty = int(pos['size'])
             pos_side = pos['posSide']
@@ -130,7 +127,6 @@ class PositionSupervisor:
             time.sleep(0.3)
             deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty, reduce_only=True)
             time.sleep(1.2)
-        # =================================================================================
 
         self._open_position(action, curr_px)
 
@@ -152,7 +148,6 @@ class PositionSupervisor:
             self.current_sl = self.watched_entry
             self.radar_activated = False
             
-            # 本地亲自计算 TP1 价格
             tp1_m = self.regime_settings[self.regime]["tp1_m"]
             if self.current_side == "LONG":
                 self.local_tp1 = round(self.watched_entry + self.current_atr * tp1_m, 2)
@@ -165,7 +160,6 @@ class PositionSupervisor:
             distance = abs(self.fee_cover_price - self.local_tp1)
             fee_ratio = 0.80 if distance > 10.0 else (0.65 if distance > 6.0 else 0.50)
             
-            # 张数防错兜底
             if self.watched_qty == 1: qty_fee, qty_tp1 = 1, 0
             else:
                 qty_fee = max(int(self.watched_qty * fee_ratio), 1)
@@ -173,7 +167,6 @@ class PositionSupervisor:
 
             close_side = "sell" if side == "LONG" else "buy"
             
-            # 🚀 下达限价单必须带 reduce_only 护甲
             if qty_fee > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.fee_cover_price, qty_fee, reduce_only=True)
             if qty_tp1 > 0 and self.local_tp1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.local_tp1, qty_tp1, reduce_only=True)
 
@@ -187,7 +180,6 @@ class PositionSupervisor:
     def _radar_loop(self):
         while self.monitoring:
             try:
-                # 雷达获取互斥锁，避免和 Webhook 主线程指令撞车
                 if not self._lock.acquire(timeout=2.0):
                     time.sleep(1.0)
                     continue
@@ -211,18 +203,27 @@ class PositionSupervisor:
                         self._close_all("🚨 人工违规加仓，强制对冲！")
                         break
 
+                    # ==== 🚀 V9.4 核心修复：双重触发机制 ====
+                    qty_reduced = False
                     if actual_qty < self.watched_qty:
+                        logger.info(f"📦 监测到实盘仓位减少: {self.watched_qty} -> {actual_qty}，推断止盈单已被吃掉！")
+                        qty_reduced = True
                         self.watched_qty = actual_qty
                         self._save_state()
 
                     curr_px = deepcoin_client.get_current_price(self.symbol)
-                    reached = (self.current_side == "LONG" and curr_px >= self.fee_cover_price) or (self.current_side == "SHORT" and curr_px <= self.fee_cover_price)
+                    
+                    # 价格越过防线，【或者】仓位真实减少，都视为第一重护甲被击穿，必须启动保本！
+                    reached = (self.current_side == "LONG" and curr_px >= self.fee_cover_price) or \
+                              (self.current_side == "SHORT" and curr_px <= self.fee_cover_price) or \
+                              qty_reduced
 
                     if reached and not self.radar_activated:
                         self.radar_activated = True
                         self.current_sl = self.watched_entry
                         dingtalk.report_fee_cover_reached(self.current_side, self.watched_entry, self.fee_cover_price, actual_qty)
                         close_side, pos_side = ("sell", "long") if self.current_side == "LONG" else ("buy", "short")
+                        # 启动条件止损保护剩下的所有张数
                         deepcoin_client._request("POST", "/trade/order-algo", {"instId": self.symbol, "tdMode": "cross", "side": close_side, "posSide": pos_side, "ordType": "conditional", "sz": str(actual_qty), "triggerPx": str(self.current_sl), "orderPx": "-1", "reduceOnly": True})
 
                     if self.radar_activated:
@@ -242,7 +243,6 @@ class PositionSupervisor:
                             res = deepcoin_client._request("POST", "/trade/order-algo", {"instId": self.symbol, "tdMode": "cross", "side": close_side, "posSide": pos_side, "ordType": "conditional", "sz": str(actual_qty), "triggerPx": str(self.current_sl), "orderPx": "-1", "reduceOnly": True})
                             if res and str(res.get("code", "")) == "0": dingtalk.report_radar_move(self.current_side, self.current_sl)
                 finally:
-                    # 干完活立刻开锁
                     self._lock.release()
 
             except Exception as e: logger.error(f"雷达异常: {e}")
@@ -251,7 +251,6 @@ class PositionSupervisor:
     def _close_all(self, reason=""):
         logger.warning(f"🔨 启动核武级全平: {reason}")
         
-        # 第一波：激进清场 (带退避防护的撤单)
         deepcoin_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.6) 
         
@@ -265,13 +264,9 @@ class PositionSupervisor:
             close_side = "sell" if pos_side == "long" else "buy"
             
             logger.info(f"🔨 第 {attempt+1} 次物理全平: {close_side} {qty}张")
-            
-            # 强杀前再查杀一遍，避免雷达刚刚生成的残留单
             deepcoin_client.cancel_all_open_orders(self.symbol)
             time.sleep(0.3)
-            
             deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty, reduce_only=True)
-            # 退避休眠，越往后等得越久，给足 API 喘息空间
             time.sleep(1.5 + attempt * 0.5) 
                 
         deepcoin_client.cancel_all_open_orders(self.symbol) 
