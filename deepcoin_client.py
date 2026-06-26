@@ -38,20 +38,19 @@ class DeepcoinClient:
             logger.error(f"Deepcoin 请求失败 {endpoint}: {e}")
             return None
 
-    # ================= 🚀 V9.2 新增：智能安全撤单器 (Rate Limit 防护) =================
+    # ================= 🚀 V9.2 核心：智能安全撤单器 (Rate Limit 防护) =================
     def _safe_cancel(self, endpoint, params):
         res = self._request("POST", endpoint, params)
         if res and str(res.get("code", "")) != "0":
             msg = str(res.get("msg", "")).lower() + str(res.get("sMsg", "")).lower()
-            # 1. 频率限制保护
+            # 1. 频率限制保护，智能退避
             if "too many" in msg or "limit" in msg or "frequent" in msg:
-                logger.warning(f"⚠️ [频率限制] 触发 Deepcoin Rate Limit，系统退避休眠 1.5 秒... | 详情: {msg}")
+                logger.warning(f"⚠️ [频率限制] 触发 API 保护，系统退避休眠 1.5 秒... | 详情: {msg}")
                 time.sleep(1.5)
-                # 触发限频后重试一次
-                self._request("POST", endpoint, params)
-            # 2. 正常失败忽略 (订单已成交、不存在等)
+                self._request("POST", endpoint, params) # 休眠后重试一次
+            # 2. 正常失败忽略 (订单已成交、不存在等，避免污染日志)
             elif "not exist" in msg or "not found" in msg or "already" in msg or "no order" in msg:
-                pass # 静默处理，避免污染日志
+                pass 
             # 3. 真正的未知异常
             else:
                 logger.warning(f"❌ [异常撤单] Endpoint: {endpoint} | Params: {params} | Resp: {res}")
@@ -83,7 +82,7 @@ class DeepcoinClient:
         if reduce_only: params["reduceOnly"] = True
         return self._request("POST", "/trade/order", params)
 
-    # 🚀 V9.2 终极版：套用智能安全撤单器，告别满屏报错
+    # 🚀 四重无死角猎杀挂单
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
         try:
             # 1. 批量高级撤单
@@ -103,7 +102,7 @@ class DeepcoinClient:
                 for algo in pending_algos['data']:
                     if algo.get("algoId"): self._safe_cancel("/trade/cancel-algos", {"instId": symbol, "algoId": algo.get("algoId")})
                     
-            # 4. 逐点猎杀 Trigger 触发单
+            # 4. 逐点猎杀 Trigger 触发单 (专治残留冻结额度)
             trigger_pending = self._request("GET", "/trade/trigger-orders-pending", {"instType": "SWAP", "instId": symbol})
             if trigger_pending and 'data' in trigger_pending:
                 for t_ord in trigger_pending['data']:
