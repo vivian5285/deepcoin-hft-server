@@ -16,30 +16,39 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
 
-        # 四档位参数（与币安、TV策略 100% 同频）
+        # 🚀 资金比例与雷达追踪系数由 VPS 自主控制，不再自己算价格
         self.regime_settings = {
-            1: {"margin": 0.15, "ratios": [0.25, 0.35, 0.40], "tp_m": [0.75, 1.40, 2.00], "sl_m": 0.90, "trail": 0.55},
-            2: {"margin": 0.25, "ratios": [0.20, 0.35, 0.45], "tp_m": [1.10, 2.00, 2.80], "sl_m": 1.05, "trail": 0.60},
-            3: {"margin": 0.35, "ratios": [0.18, 0.32, 0.50], "tp_m": [1.30, 2.60, 3.80], "sl_m": 1.10, "trail": 0.65},
-            4: {"margin": 0.50, "ratios": [0.05, 0.20, 0.75], "tp_m": [1.55, 3.00, 4.80], "sl_m": 1.25, "trail": 0.70}
+            1: {"margin": 0.15, "ratios": [0.25, 0.35, 0.40], "trail": 0.55},
+            2: {"margin": 0.25, "ratios": [0.20, 0.35, 0.45], "trail": 0.60},
+            3: {"margin": 0.35, "ratios": [0.18, 0.32, 0.50], "trail": 0.65},
+            4: {"margin": 0.50, "ratios": [0.05, 0.20, 0.75], "trail": 0.70}
         }
-        self.leverage = 20
+        self.leverage = 15  # 统一调整为 15 倍杠杆
         self.face_value = 0.1
 
         self.regime, self.current_atr, self.tv_price = 3, 30.0, 0.0
-        self.tv_tps = [0.0, 0.0, 0.0]
+        self.tv_tps = [0.0, 0.0, 0.0]  # TV 军师传来的精准理论止盈价格
         self.current_side, self.last_tv_side = None, None
-        self.watched_qty, self.watched_entry, self.current_sl = 0.0, 0.0, 0.0
-        self.initial_qty, self.best_price = 0.0, 0.0
+        self.watched_qty, self.watched_entry, self.current_sl = 0, 0.0, 0.0
+        self.initial_qty, self.best_price = 0, 0.0
         
         self.state_file = 'deepcoin_vps_state.json'
-        logger.info("🧠 深币 VPS [无硬止损优化版] 已加载：拒绝插针扫损，雷达锁润待命！")
+        logger.info("🧠 深币 VPS [军师托管版] 已加载：TV全权指挥价格，15倍杠杆配置完毕！")
 
     def _save_state(self):
         try:
             with open(self.state_file, 'w') as f:
-                json.dump({"last_tv_side": self.last_tv_side, "current_side": self.current_side, "watched_qty": self.watched_qty, "watched_entry": self.watched_entry, "current_sl": self.current_sl, "monitoring": self.monitoring}, f)
-        except: pass
+                json.dump({
+                    "last_tv_side": self.last_tv_side, 
+                    "current_side": self.current_side, 
+                    "watched_qty": self.watched_qty, 
+                    "watched_entry": self.watched_entry, 
+                    "current_sl": self.current_sl, 
+                    "monitoring": self.monitoring,
+                    "tv_tps": self.tv_tps  # 必须保存 TV 传来的止盈价
+                }, f)
+        except Exception as e:
+            logger.error(f"保存状态失败: {e}")
 
     def _get_active_position(self):
         res = deepcoin_client.get_position_info(self.symbol)
@@ -70,18 +79,24 @@ class PositionSupervisor:
         
         self.current_atr = float(payload.get("atr", 30.0))
         self.tv_price = round(float(payload.get("price", 0.0)), 2)
-        self.tv_tps = [float(payload.get("tv_tp1", 0)), float(payload.get("tv_tp2", 0)), float(payload.get("tv_tp3", 0))]
+        
+        # 无脑提取 TV 算好的理论价格
+        self.tv_tps = [
+            float(payload.get("tv_tp1", 0)), 
+            float(payload.get("tv_tp2", 0)), 
+            float(payload.get("tv_tp3", 0))
+        ]
+        close_reason = payload.get("reason", "策略指标反转/波动率安全退出")
 
         if not raw_action or not self._lock.acquire(timeout=10.0): return
         try:
             self.monitoring = False
             if raw_action.startswith("CLOSE_PROTECT"):
-                reason = raw_action.split("|")[1] if "|" in raw_action else "策略指标反转/波动率安全退出"
-                self._close_all(f"🛡️ 保护性全平：{reason}")
+                self._close_all(f"🛡️ 保护性全平：{close_reason}")
             elif raw_action == "CLOSE_TP3": 
                 self._close_all("🎯 完美胜利：大趋势吃满，TP3 终极收网")
             elif raw_action == "CLOSE": 
-                self._close_all(f"🧹 换防清场：{payload.get('reason', '常规平仓指令')}")
+                self._close_all(f"🧹 换防清场：{close_reason}")
             elif raw_action in ["LONG", "SHORT"]:
                 self.last_tv_side = raw_action
                 self._save_state()
@@ -131,22 +146,17 @@ class PositionSupervisor:
         close_side, pos_side = ("sell", "long") if self.current_side == "LONG" else ("buy", "short")
         qty1, qty2, qty3 = self._calculate_tp_quantities(qty, cfg["ratios"])
 
-        tp_pxs = [0.0, 0.0, 0.0]
-        if self.current_side == "LONG":
-            tp_pxs = [round(entry_price + self.current_atr * m, 2) for m in cfg["tp_m"]]
-            self.current_sl = entry_price
-        else:
-            tp_pxs = [round(entry_price - self.current_atr * m, 2) for m in cfg["tp_m"]]
-            self.current_sl = entry_price
+        tp_pxs = self.tv_tps  # 彻底听从 TV 给的价格
+        self.current_sl = entry_price # 仅作雷达启动参考，不挂物理止损单
 
-        # 仅挂止盈，坚决不挂初始物理止损
-        if qty1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[0], qty1, reduce_only=True)
-        if qty2 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[1], qty2, reduce_only=True)
-        if qty3 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[2], qty3, reduce_only=True)
+        # 无脑挂出 TV 给的限价止盈单
+        if qty1 > 0 and tp_pxs[0] > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[0], qty1, reduce_only=True)
+        if qty2 > 0 and tp_pxs[1] > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[1], qty2, reduce_only=True)
+        if qty3 > 0 and tp_pxs[2] > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[2], qty3, reduce_only=True)
 
         self.monitoring = True
         self._save_state()
-        dingtalk.report_supervisor_open(self.current_side, entry_price, self.tv_price, qty, tp_pxs, self.current_atr, self.regime, self.tv_tps)
+        dingtalk.report_supervisor_open(self.current_side, entry_price, self.tv_price, qty, tp_pxs, self.current_atr, self.regime)
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
     def _sentinel_loop(self):
@@ -171,24 +181,24 @@ class PositionSupervisor:
                         old_qty = self.watched_qty
                         self.watched_qty = actual_qty
                         self.watched_entry = pos['entry_price']
-                        logger.info(f"🔄 [智慧大脑] 感知到人工加减仓: {old_qty} ➔ {actual_qty}，重新重构防线！")
+                        logger.info(f"🔄 [智慧大脑] 感知到仓位变化: {old_qty} ➔ {actual_qty}，重新重构防线！")
                         self._save_state()
                         
                         deepcoin_client.cancel_all_open_orders(self.symbol)
                         time.sleep(0.5)
-                        # 仅当雷达已激活时重构防线才带物理止损
                         sl_to_pass = self.current_sl if (self.current_side == "LONG" and self.current_sl > self.watched_entry) or (self.current_side == "SHORT" and self.current_sl < self.watched_entry) else None
                         self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=sl_to_pass)
-                        dingtalk.report_manual_position_change("手动加仓" if actual_qty > old_qty else "手动减仓(或部分止盈吃单)", old_qty, actual_qty, self.watched_entry)
+                        dingtalk.report_manual_position_change("手动加仓" if actual_qty > old_qty else "部分止盈吃单 / 手动减仓", old_qty, actual_qty, self.watched_entry)
 
                     curr_px = deepcoin_client.get_current_price(self.symbol)
                     self.best_price = max(self.best_price, curr_px) if self.current_side == "LONG" else min(self.best_price, curr_px)
                     
-                    tp1_m = self.regime_settings[self.regime]["tp_m"][0]
+                    # 雷达触发计算 (基于 TV 传来的 TP1 距离)
+                    tp1_dist = abs(self.tv_tps[0] - self.watched_entry) if self.tv_tps[0] > 0 else self.current_atr * 1.5
                     trail_factor = self.regime_settings[self.regime]["trail"]
-                    activation_ratio = 0.55
+                    activation_ratio = 0.45 if self.regime >= 3 else 0.60 
 
-                    required = self.watched_entry + self.current_atr * tp1_m * activation_ratio if self.current_side == "LONG" else self.watched_entry - self.current_atr * tp1_m * activation_ratio
+                    required = self.watched_entry + (tp1_dist * activation_ratio) if self.current_side == "LONG" else self.watched_entry - (tp1_dist * activation_ratio)
                     has_moved_favorably = curr_px >= required if self.current_side == "LONG" else curr_px <= required
 
                     if has_moved_favorably:
@@ -210,7 +220,7 @@ class PositionSupervisor:
                 finally:
                     self._lock.release()
             except Exception as e: logger.error(f"哨兵异常: {e}")
-            time.sleep(4)
+            time.sleep(6) # 放缓巡逻频率，6秒足够且安全
 
     def _rebuild_defenses(self, qty, entry, dynamic_sl=None):
         close_side, pos_side = ("sell", "long") if self.current_side == "LONG" else ("buy", "short")
@@ -218,11 +228,11 @@ class PositionSupervisor:
         time.sleep(0.4)
 
         qty1, qty2, qty3 = self._calculate_tp_quantities(qty, self.regime_settings[self.regime]["ratios"])
-        tp_pxs = [round(entry + self.current_atr * m, 2) if self.current_side == "LONG" else round(entry - self.current_atr * m, 2) for m in self.regime_settings[self.regime]["tp_m"]]
+        tp_pxs = self.tv_tps # 无脑挂出TV定下的价格
 
-        if qty1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[0], qty1, reduce_only=True)
-        if qty2 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[1], qty2, reduce_only=True)
-        if qty3 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[2], qty3, reduce_only=True)
+        if qty1 > 0 and tp_pxs[0] > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[0], qty1, reduce_only=True)
+        if qty2 > 0 and tp_pxs[1] > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[1], qty2, reduce_only=True)
+        if qty3 > 0 and tp_pxs[2] > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[2], qty3, reduce_only=True)
         
         if dynamic_sl: deepcoin_client.place_stop_market_order(self.symbol, close_side, pos_side, dynamic_sl)
 
@@ -243,7 +253,10 @@ class PositionSupervisor:
     def recover_state_on_startup(self):
         try:
             if os.path.exists(self.state_file):
-                with open(self.state_file, 'r') as f: self.last_tv_side = json.load(f).get("last_tv_side")
+                with open(self.state_file, 'r') as f: 
+                    s = json.load(f)
+                    self.last_tv_side = s.get("last_tv_side")
+                    self.tv_tps = s.get("tv_tps", [0.0, 0.0, 0.0])
             pos = self._get_active_position()
             if pos and pos.get('size', 0) > 0:
                 self.current_side = "LONG" if pos.get('posSide') == "long" else "SHORT"
