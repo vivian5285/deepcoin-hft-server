@@ -44,7 +44,7 @@ class PositionSupervisor:
         self.current_sl = 0.0
         
         self.state_file = 'deepcoin_vps_state.json'
-        logger.info("🧠 深币 VPS [V9.4 智能识破版] 已加载：双重触发防漏报，仓位减少即刻保本！")
+        logger.info("🧠 深币 VPS [V9.5 终极防漏版] 已加载：双重触发释放冻结，核武清场全网平仓！")
 
     def _save_state(self):
         try:
@@ -118,14 +118,11 @@ class PositionSupervisor:
             if not pos or int(pos.get('size', 0)) == 0:
                 break 
                 
-            qty = int(pos['size'])
-            pos_side = pos['posSide']
-            close_side = "sell" if pos_side == "long" else "buy"
-            
-            logger.warning(f"⚠️ [开仓前警报] 发现顽固残留 {qty} 张，执行战前强制抹杀 (第{attempt+1}次)！")
+            logger.warning(f"⚠️ [开仓前警报] 发现顽固残留，执行战前原子级批量清仓抹杀 (第{attempt+1}次)！")
             deepcoin_client.cancel_all_open_orders(self.symbol)
             time.sleep(0.3)
-            deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty, reduce_only=True)
+            # 战前原子级批量清理，不给残留留机会
+            deepcoin_client._request("POST", "/trade/batch-close-position", {"productGroup": "SwapU", "instId": self.symbol})
             time.sleep(1.2)
 
         self._open_position(action, curr_px)
@@ -203,7 +200,6 @@ class PositionSupervisor:
                         self._close_all("🚨 人工违规加仓，强制对冲！")
                         break
 
-                    # ==== 🚀 V9.4 核心修复：双重触发机制 ====
                     qty_reduced = False
                     if actual_qty < self.watched_qty:
                         logger.info(f"📦 监测到实盘仓位减少: {self.watched_qty} -> {actual_qty}，推断止盈单已被吃掉！")
@@ -213,7 +209,6 @@ class PositionSupervisor:
 
                     curr_px = deepcoin_client.get_current_price(self.symbol)
                     
-                    # 价格越过防线，【或者】仓位真实减少，都视为第一重护甲被击穿，必须启动保本！
                     reached = (self.current_side == "LONG" and curr_px >= self.fee_cover_price) or \
                               (self.current_side == "SHORT" and curr_px <= self.fee_cover_price) or \
                               qty_reduced
@@ -223,8 +218,20 @@ class PositionSupervisor:
                         self.current_sl = self.watched_entry
                         dingtalk.report_fee_cover_reached(self.current_side, self.watched_entry, self.fee_cover_price, actual_qty)
                         close_side, pos_side = ("sell", "long") if self.current_side == "LONG" else ("buy", "short")
-                        # 启动条件止损保护剩下的所有张数
-                        deepcoin_client._request("POST", "/trade/order-algo", {"instId": self.symbol, "tdMode": "cross", "side": close_side, "posSide": pos_side, "ordType": "conditional", "sz": str(actual_qty), "triggerPx": str(self.current_sl), "orderPx": "-1", "reduceOnly": True})
+                        
+                        # 🚀 升级为深币原生 /trade/trigger-order 条件单接口挂止损
+                        deepcoin_client._request("POST", "/trade/trigger-order", {
+                            "instId": self.symbol,
+                            "productGroup": "Swap",
+                            "sz": str(int(actual_qty)),
+                            "side": close_side,
+                            "posSide": pos_side,
+                            "isCrossMargin": "1",
+                            "orderType": "market",
+                            "triggerPrice": str(self.current_sl),
+                            "mrgPosition": "merge",
+                            "tdMode": "cross"
+                        })
 
                     if self.radar_activated:
                         moved = False
@@ -240,7 +247,20 @@ class PositionSupervisor:
                             time.sleep(0.3)
                             close_side, pos_side = ("sell", "long") if self.current_side == "LONG" else ("buy", "short")
                             if self.local_tp1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.local_tp1, actual_qty, reduce_only=True)
-                            res = deepcoin_client._request("POST", "/trade/order-algo", {"instId": self.symbol, "tdMode": "cross", "side": close_side, "posSide": pos_side, "ordType": "conditional", "sz": str(actual_qty), "triggerPx": str(self.current_sl), "orderPx": "-1", "reduceOnly": True})
+                            
+                            # 🚀 移动追踪防线：升级为原生条件单接口提交
+                            res = deepcoin_client._request("POST", "/trade/trigger-order", {
+                                "instId": self.symbol,
+                                "productGroup": "Swap",
+                                "sz": str(int(actual_qty)),
+                                "side": close_side,
+                                "posSide": pos_side,
+                                "isCrossMargin": "1",
+                                "orderType": "market",
+                                "triggerPrice": str(self.current_sl),
+                                "mrgPosition": "merge",
+                                "tdMode": "cross"
+                            })
                             if res and str(res.get("code", "")) == "0": dingtalk.report_radar_move(self.current_side, self.current_sl)
                 finally:
                     self._lock.release()
@@ -248,9 +268,11 @@ class PositionSupervisor:
             except Exception as e: logger.error(f"雷达异常: {e}")
             time.sleep(3.5)
 
+    # ================= 🚀 V9.5 升级：核武级原生批量平仓防御防线 =================
     def _close_all(self, reason=""):
         logger.warning(f"🔨 启动核武级全平: {reason}")
         
+        # 极度重要：必须先撤销所有普通/条件挂单，释放全部被冻结锁定的仓位！
         deepcoin_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.6) 
         
@@ -260,13 +282,20 @@ class PositionSupervisor:
                 break 
                 
             qty = int(pos['size'])
-            pos_side = pos['posSide'] 
-            close_side = "sell" if pos_side == "long" else "buy"
+            logger.info(f"🔨 第 {attempt+1} 次核武平仓: 发现 {qty} 张残留，启动深币官方原生批量平仓")
             
-            logger.info(f"🔨 第 {attempt+1} 次物理全平: {close_side} {qty}张")
-            deepcoin_client.cancel_all_open_orders(self.symbol)
-            time.sleep(0.3)
-            deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty, reduce_only=True)
+            # 🚀 核心升级：利用深币官方专门提供的 /trade/batch-close-position 一键强制平掉指定产品的所有仓位
+            res = deepcoin_client._request("POST", "/trade/batch-close-position", {
+                "productGroup": "SwapU", # 明确为 U本位永续合约
+                "instId": self.symbol
+            })
+            
+            # 兜底风控：如果官方批量平仓接口产生未知的网络异常，使用传统的反向市价下单强制对冲
+            if not res or str(res.get("code", "")) != "0":
+                pos_side = pos['posSide'] 
+                close_side = "sell" if pos_side == "long" else "buy"
+                deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty, reduce_only=True)
+            
             time.sleep(1.5 + attempt * 0.5) 
                 
         deepcoin_client.cancel_all_open_orders(self.symbol) 
