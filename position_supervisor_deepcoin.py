@@ -16,7 +16,7 @@ class PositionSupervisor:
         self.monitoring = False
         self._lock = threading.Lock()
 
-        # 四档资金利用率配置
+        # 四档资金利用率配置（保留，但入场不再使用）
         self.regime_settings = {
             1: {"margin": 0.15}, 
             2: {"margin": 0.25}, 
@@ -27,7 +27,7 @@ class PositionSupervisor:
         self.leverage = 20
         self.face_value = 0.1
         
-        # 🚀 4.5 USDT 黄金甜点绝对价差
+        # 固定微利参数
         self.fee_cover_margin = 0.0015 
         self.micro_profit_usdt = 4.5   
         
@@ -100,14 +100,12 @@ class PositionSupervisor:
     def _handle_smart_entry(self, action):
         logger.info(f"⚡ 收到建仓信号 [{action}]，启动强制净身流程！")
         
-        # 绝对撤单：无视状态，核武清空挂单释放额度！
         deepcoin_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.5)
 
         current_pos = self._get_active_position()
         curr_px = deepcoin_client.get_current_price(self.symbol)
 
-        # 先平后开：绝对不带旧仓位
         if current_pos and current_pos.get('size', 0) > 0:
             current_side = "LONG" if current_pos["posSide"] == "long" else "SHORT"
             if current_side == action: 
@@ -116,7 +114,6 @@ class PositionSupervisor:
                 self._close_all("反方向指令到达，强制【先平后开】对冲换防！")
             time.sleep(1.2)
 
-        # 终极净空核查
         logger.info("🛡️ [战前自检] 正在核查阵地是否 100% 净空...")
         for attempt in range(3):
             pos = self._get_active_position()
@@ -136,10 +133,17 @@ class PositionSupervisor:
     def _open_position(self, side, curr_px):
         if curr_px <= 0: return
         
-        qty = max(int((deepcoin_client.get_available_balance() * self.regime_settings[self.regime]["margin"] * self.leverage) / (curr_px * self.face_value)), 1)
+        # ==================== 只修改此处 ====================
+        # 固定使用本金的 30% + 20倍杠杆
+        MARGIN_RATIO = 0.30
+        LEVERAGE = 20
+        available_balance = deepcoin_client.get_available_balance()
+        qty = max(int((available_balance * MARGIN_RATIO * LEVERAGE) / (curr_px * self.face_value)), 1)
+        # =================================================
+
         open_side, pos_side = ("buy", "long") if side == "LONG" else ("sell", "short")
         
-        logger.info(f"🚀 [唯一持仓] 绝对干净状态开仓: {open_side} {qty}张 (持仓方向: {pos_side})")
+        logger.info(f"🚀 [固定头寸开仓] {open_side} {qty}张 | 使用余额30% + {LEVERAGE}x杠杆")
         deepcoin_client.place_market_order(self.symbol, open_side, pos_side, qty)
         time.sleep(2.0)
 
@@ -160,7 +164,7 @@ class PositionSupervisor:
             
             self._save_state()
 
-            logger.info(f"🎯 [挂出止盈] 全仓 {self.watched_qty} 张布防于 4.5 刀绝对微利价: {self.fee_cover_price}")
+            logger.info(f"🎯 [挂出止盈] 全仓 {self.watched_qty} 张布防于 4.5U 绝对微利价: {self.fee_cover_price}")
             deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.fee_cover_price, self.watched_qty, reduce_only=True)
 
             dingtalk.report_deepcoin_open(self.current_side, self.regime, self.current_atr, self.watched_entry, self.tv_price, self.watched_qty, self.watched_qty, self.fee_cover_price)
@@ -182,13 +186,11 @@ class PositionSupervisor:
                     actual_qty = int(pos['size']) if pos else 0
                     actual_side = "LONG" if pos and pos.get('posSide') == "long" else "SHORT"
 
-                    # 1. 监测方向翻转异常
                     if actual_qty > 0 and actual_side != self.last_tv_side:
                         self._close_all("强行对齐方向")
                         dingtalk.report_force_align(actual_side, self.last_tv_side)
                         break
 
-                    # 2. 监测仓位归零 (止盈触发 或 姐姐在APP上手动全平了)
                     if actual_qty == 0:
                         if self.watched_qty > 0: 
                             logger.info("🎯 [态势感知] 实盘仓位归零！可能是微利单成交，或人工介入全平。")
@@ -197,13 +199,11 @@ class PositionSupervisor:
                             self.monitoring = False
                         break
 
-                    # 3. 🚀 V10.0 核心智能：监测数量异动 (人工加减仓 或 极端 Partial Fill)
                     if actual_qty != self.watched_qty and actual_qty > 0:
                         logger.warning(f"🔄 [态势感知] 监测到实盘持仓变化 (人工增减/部分成交): {self.watched_qty} -> {actual_qty}张。启动热同步！")
                         self.watched_qty = actual_qty
-                        self.watched_entry = pos['entry_price'] # 更新最新的持仓均价
+                        self.watched_entry = pos['entry_price']
                         
-                        # 基于最新均价，重新计算 4.5U 黄金甜点
                         if self.current_side == "LONG":
                             self.fee_cover_price = round(self.watched_entry + self.micro_profit_usdt, 2)
                             close_side = "sell"
@@ -213,10 +213,9 @@ class PositionSupervisor:
                         
                         self._save_state()
                         
-                        # 强撤失效挂单，重铸新防线
                         deepcoin_client.cancel_all_open_orders(self.symbol)
                         time.sleep(0.4)
-                        logger.info(f"🔄 [态势重置] 为全新的 {self.watched_qty} 张重新挂设止盈限价: {self.fee_cover_price}")
+                        logger.info(f"🔄 [态势重设] 为全新的 {self.watched_qty} 张重新挂设止盈限价: {self.fee_cover_price}")
                         deepcoin_client.place_limit_order(self.symbol, close_side, pos['posSide'], self.fee_cover_price, self.watched_qty, reduce_only=True)
                         
                         dingtalk.report_system_alert("🔄 态势感知热同步", f"发现阵地张数异动！已接管最新 {self.watched_qty} 张仓位，并将微利目标重新锚定至 {self.fee_cover_price}！")
@@ -307,13 +306,11 @@ class PositionSupervisor:
         else:
             dingtalk.report_system_alert("⚠️ 清仓失败", f"多次尝试后仍双向残留 {final_pos.get('size')} 张，建议人工介入！")
 
-    # ================= 🚀 V10.0 核心智能：VPS启动时态势全量感知与同步 =================
     def recover_state_on_startup(self):
         logger.info("🔄 [启动自检] VPS拉起，正在直连深币云端同步真实盘口数据...")
         try:
             pos = self._get_active_position()
             
-            # 情况A：实盘是空的，绝对净身！
             if not pos or pos.get('size', 0) == 0:
                 logger.info("🟢 [启动自检] 当前无实盘持仓，强制扫清历史挂单，随时恭候新信号！")
                 deepcoin_client.cancel_all_open_orders(self.symbol)
@@ -322,7 +319,6 @@ class PositionSupervisor:
                 self._save_state()
                 return
 
-            # 情况B：实盘有仓位，无缝接管并重设微利限价单！
             actual_qty = int(pos['size'])
             self.current_side = "LONG" if pos.get('posSide') == "long" else "SHORT"
             self.watched_entry = pos['entry_price']
@@ -356,5 +352,4 @@ class PositionSupervisor:
 position_supervisor = PositionSupervisor()
 deepcoin_processor = position_supervisor
 
-# 🚀 服务器启动时，强制执行一次实盘态势同步！
 position_supervisor.recover_state_on_startup()
