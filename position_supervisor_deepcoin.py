@@ -44,7 +44,7 @@ class PositionSupervisor:
         self.current_sl = 0.0
         
         self.state_file = 'deepcoin_vps_state.json'
-        logger.info("🧠 深币 VPS [V9.5 终极防漏版] 已加载：双重触发释放冻结，核武清场全网平仓！")
+        logger.info("🧠 深币 VPS [V9.6 绝对净空版] 已加载：战前强制清道夫开启，6轮核武级平仓护航！")
 
     def _save_state(self):
         try:
@@ -100,6 +100,7 @@ class PositionSupervisor:
         if pos and pos.get('size', 0) > 0: self._close_all(reason)
         else: dingtalk.report_deepcoin_clear(f"{reason}", "✅ 提前安全空仓")
 
+    # ================= 🚀 V9.6 升级：战前终极净空清道夫 =================
     def _handle_smart_entry(self, action):
         current_pos = self._get_active_position()
         curr_px = deepcoin_client.get_current_price(self.symbol)
@@ -110,7 +111,10 @@ class PositionSupervisor:
             else: self._close_all("反方向指令到达，对冲换防")
             time.sleep(1.2)
         else:
+            # 🧹 战前清理：强制撤销遗留的保本单和TP1限价单，杜绝仓位冻结
+            logger.info("🧹 [战前清理] 强制撤销历史保本单和TP1单...")
             deepcoin_client.cancel_all_open_orders(self.symbol)
+            time.sleep(0.5)
 
         logger.info("🛡️ [战前自检] 正在核查阵地是否 100% 净空...")
         for attempt in range(3):
@@ -118,10 +122,12 @@ class PositionSupervisor:
             if not pos or int(pos.get('size', 0)) == 0:
                 break 
                 
-            logger.warning(f"⚠️ [开仓前警报] 发现顽固残留，执行战前原子级批量清仓抹杀 (第{attempt+1}次)！")
+            qty = int(pos['size'])
+            logger.warning(f"⚠️ [开仓前警报] 发现顽固残留 {qty} 张，执行战前原子级抹杀 (第{attempt+1}次)！")
+            
             deepcoin_client.cancel_all_open_orders(self.symbol)
-            time.sleep(0.3)
-            # 战前原子级批量清理，不给残留留机会
+            time.sleep(0.4)
+            # 使用官方核武接口强平残留
             deepcoin_client._request("POST", "/trade/batch-close-position", {"productGroup": "SwapU", "instId": self.symbol})
             time.sleep(1.2)
 
@@ -219,7 +225,7 @@ class PositionSupervisor:
                         dingtalk.report_fee_cover_reached(self.current_side, self.watched_entry, self.fee_cover_price, actual_qty)
                         close_side, pos_side = ("sell", "long") if self.current_side == "LONG" else ("buy", "short")
                         
-                        # 🚀 升级为深币原生 /trade/trigger-order 条件单接口挂止损
+                        # 🚀 替换为深币最新原生条件单接口
                         deepcoin_client._request("POST", "/trade/trigger-order", {
                             "instId": self.symbol,
                             "productGroup": "Swap",
@@ -248,7 +254,7 @@ class PositionSupervisor:
                             close_side, pos_side = ("sell", "long") if self.current_side == "LONG" else ("buy", "short")
                             if self.local_tp1 > 0: deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.local_tp1, actual_qty, reduce_only=True)
                             
-                            # 🚀 移动追踪防线：升级为原生条件单接口提交
+                            # 🚀 替换为深币最新原生条件单接口
                             res = deepcoin_client._request("POST", "/trade/trigger-order", {
                                 "instId": self.symbol,
                                 "productGroup": "Swap",
@@ -268,45 +274,51 @@ class PositionSupervisor:
             except Exception as e: logger.error(f"雷达异常: {e}")
             time.sleep(3.5)
 
-    # ================= 🚀 V9.5 升级：核武级原生批量平仓防御防线 =================
+    # ================= 🚀 V9.6 升级：阶梯式休眠与 6 轮核武扫荡 =================
     def _close_all(self, reason=""):
         logger.warning(f"🔨 启动核武级全平: {reason}")
         
-        # 极度重要：必须先撤销所有普通/条件挂单，释放全部被冻结锁定的仓位！
-        deepcoin_client.cancel_all_open_orders(self.symbol)
-        time.sleep(0.6) 
+        # 极度重要：必须先彻底撤销所有挂单释放仓位，连发两道撤单指令
+        for clear_attempt in range(2):
+            deepcoin_client.cancel_all_open_orders(self.symbol)
+            time.sleep(0.4) 
         
-        for attempt in range(5):
+        # 提升至 6 轮防渗漏循环
+        for round_num in range(6):
             pos = self._get_active_position()
             if not pos or pos.get('size', 0) == 0: 
                 break 
                 
             qty = int(pos['size'])
-            logger.info(f"🔨 第 {attempt+1} 次核武平仓: 发现 {qty} 张残留，启动深币官方原生批量平仓")
+            logger.info(f"🔨 第 {round_num+1} 轮强平: 剩余 {qty} 张，启动双重剿灭")
             
-            # 🚀 核心升级：利用深币官方专门提供的 /trade/batch-close-position 一键强制平掉指定产品的所有仓位
+            # 第一重：调用深币原生批量强平接口
             res = deepcoin_client._request("POST", "/trade/batch-close-position", {
-                "productGroup": "SwapU", # 明确为 U本位永续合约
+                "productGroup": "SwapU", 
                 "instId": self.symbol
             })
             
-            # 兜底风控：如果官方批量平仓接口产生未知的网络异常，使用传统的反向市价下单强制对冲
+            # 第二重：兜底对冲（应对网络接口偶发报错）
             if not res or str(res.get("code", "")) != "0":
                 pos_side = pos['posSide'] 
                 close_side = "sell" if pos_side == "long" else "buy"
                 deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty, reduce_only=True)
             
-            time.sleep(1.5 + attempt * 0.5) 
+            # 🚀 给予充分的撮合与局部成交等待时间，解决 Partial Fill
+            time.sleep(1.8 if round_num < 3 else 2.5) 
                 
+        # 最终强制扫尾，确保没有任何遗留条件单作祟
         deepcoin_client.cancel_all_open_orders(self.symbol) 
+        time.sleep(0.5)
+        
         final_pos = self._get_active_position()
         self.monitoring, self.radar_activated, self.watched_qty = False, False, 0
         self._save_state()
         
         if not final_pos or final_pos.get('size', 0) == 0:
-            if reason: dingtalk.report_deepcoin_clear(reason, "✅ 5轮核武器全平成功")
+            if reason: dingtalk.report_deepcoin_clear(reason, "✅ 最终全平成功，阵地已绝对净空")
         else:
-            dingtalk.report_system_alert("⚠️ 清仓失败", f"已执行5次爆破对冲，仍有残留: {final_pos.get('size')} 张，建议人工介入！")
+            dingtalk.report_system_alert("⚠️ 清仓失败", f"多次尝试后仍残留 {final_pos.get('size')} 张，建议人工介入！")
 
     def recover_state_on_startup(self):
         try:
