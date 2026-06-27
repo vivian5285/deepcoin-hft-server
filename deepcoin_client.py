@@ -38,7 +38,7 @@ class DeepcoinClient:
             logger.error(f"Deepcoin 请求失败 {endpoint}: {e}")
             return None
 
-    # ================= 🚀 V9.5 核心：智能安全撤单器 (Rate Limit 防护) =================
+    # ================= 🚀 V9.6 核心：智能安全撤单器 (Rate Limit 防护) =================
     def _safe_cancel(self, endpoint, params):
         res = self._request("POST", endpoint, params)
         if res and str(res.get("code", "")) != "0":
@@ -82,7 +82,7 @@ class DeepcoinClient:
         if reduce_only: params["reduceOnly"] = True
         return self._request("POST", "/trade/order", params)
 
-    # ================= 🚀 V9.5 升级：四重天网级猎杀挂单 (适配深币最新原生接口) =================
+    # ================= 🚀 V9.6 升级：四重天网级猎杀挂单 (适配深币最新原生接口) =================
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
         try:
             # 转换格式：ETH-USDT-SWAP -> ETHUSDT
@@ -96,7 +96,7 @@ class DeepcoinClient:
                 "IsMergeMode": 1
             })
             
-            # 2. 新版原生：一键撤销全部合约条件单/止盈止损单（无死角清理）
+            # 2. 新版原生：一键撤销全部合约条件单/止盈止损单（无死角清理冻结仓位）
             self._safe_cancel("/trade/swap/cancel-trigger-all", {
                 "InstrumentID": base_symbol,
                 "ProductGroup": "SwapU",
