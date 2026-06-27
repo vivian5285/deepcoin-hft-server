@@ -30,7 +30,7 @@ def send_alert(title, data_dict, header_color="#4B0082"):
     signed_url = _get_signed_url()
     if not signed_url: return
     body_text = "\n".join([f"- **{k}**: {v}" for k, v in data_dict.items()])
-    markdown_text = f"### <font color=\"{header_color}\">{title}</font>\n> **⏱ 军区时间**：`{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  \n> **📍 阵地标识**：[ 中海资本 · 深币高频微利刷佣版 V10.1 ]\n\n---\n{body_text}\n\n---\n*🖨️ Quant AI · 深币紫金高频印钞机*"
+    markdown_text = f"### <font color=\"{header_color}\">{title}</font>\n> **⏱ 军区时间**：`{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  \n> **📍 阵地标识**：[ 中海资本 · 深币高频微利刷佣版 V10.2 ]\n\n---\n{body_text}\n\n---\n*🖨️ Quant AI · 深币紫金高频印钞机*"
     try: requests.post(signed_url, json={"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}, timeout=6)
     except Exception as e: logger.error(f"钉钉发送失败: {e}")
 
@@ -55,6 +55,33 @@ def report_deepcoin_open(side, regime, atr, entry_price, tv_price, qty, fee_qty,
         "📡 战术意图": _deep_purple("高频微赚 + 手续费返佣为主，覆盖成本后快速离场")
     }, "#4B0082")
 
+def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price, fee_price):
+    """人工加仓 / 减仓专用消息"""
+    if action_type == "加仓":
+        title = "📈 人工加仓同步完成"
+        color = "#27AE60"
+    else:
+        title = "📉 人工减仓同步完成"
+        color = "#E67E22"
+
+    send_alert(title, {
+        "操作类型": _blue(action_type),
+        "原持仓数量": f"`{old_qty}` 张",
+        "当前持仓数量": f"`{new_qty}` 张",
+        "最新开仓均价": f"**{new_entry_price:.2f}** USDT",
+        "止盈单重置": f"已重新挂载 **4.5U微利** @ `{fee_price:.2f}` USDT",
+        "说明": _purple("雷达已自动同步最新持仓并更新止盈单")
+    }, color)
+
+def report_manual_full_close():
+    """人工全平专用消息"""
+    send_alert("🛑 人工全平检测", {
+        "操作类型": _red("人工全平"),
+        "雷达状态": "监控已停止",
+        "后续动作": _gray("等待新的TV信号或手动重新开仓"),
+        "说明": _purple("检测到仓位被手动清空，系统已停止自动监控")
+    }, "#C0392B")
+
 def report_fee_cover_reached(side, entry_price, fee_cover_price, remaining_qty):
     send_alert("🛡️ 微利目标达成", {
         "触发方向": _green("多头") if side == "LONG" else _red("空头"),
@@ -64,23 +91,22 @@ def report_fee_cover_reached(side, entry_price, fee_cover_price, remaining_qty):
     }, "#8E44AD")
 
 def report_radar_move(side, new_sl):
-    # 因为你以固定微利为主，追踪移动较少，这里保留但弱化提示
     send_alert("📈 止损微调", {
         "方向": _green("多头") if side == "LONG" else _red("空头"),
         "最新止损价": f"**{new_sl:.2f}** USDT",
-        "说明": _gray("固定微利策略下的轻微止损保护调整")
+        "说明": _gray("固定微利策略下的轻微保护调整")
     }, "#8E44AD")
 
 def report_deepcoin_clear(reason, status_msg):
-    if "极速微利" in reason or "落袋" in reason: 
-        title, color = "🏆 微利收网成功", "#27AE60"
+    if "人工全平" in reason:
+        title, color = "🛑 人工全平", "#C0392B"
     elif "对齐" in reason or "换防" in reason:
         title, color = "🧹 阵地换防清仓", "#7F8C8D"
-    elif "人工" in reason:
-        title, color = "🛑 人工干预清仓", "#FF3333"
-    else: 
+    elif "异常" in reason:
+        title, color = "⚠️ 仓位异常归零", "#E74C3C"
+    else:
         title, color = "🛡️ 策略清仓", "#E67E22"
-        
+
     send_alert(title, {
         "清场原因": reason,
         "核查结果": f"**{status_msg}**"
@@ -95,6 +121,6 @@ def report_force_align(real_side, expected_side):
 
 def report_system_alert(title, detail):
     send_alert(f"⚠️ 系统告警：{title}", {
-        "告警级别": _red("最高级别"),
+        "告警级别": _red("重要提醒"),
         "详情": _red(f"**{detail}**")
     }, "#FF0000")
