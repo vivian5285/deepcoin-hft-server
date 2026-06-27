@@ -38,19 +38,18 @@ class DeepcoinClient:
             logger.error(f"Deepcoin 请求失败 {endpoint}: {e}")
             return None
 
-    # ================= 🚀 V9.7 核心：智能安全撤单器 (Rate Limit 防护) =================
     def _safe_cancel(self, endpoint, params):
         res = self._request("POST", endpoint, params)
         if res and str(res.get("code", "")) != "0":
             msg = str(res.get("msg", "")).lower() + str(res.get("sMsg", "")).lower()
             if "too many" in msg or "limit" in msg or "frequent" in msg:
-                logger.warning(f"⚠️ [频率限制] 触发 API 保护，系统退避休眠 1.5 秒... | 详情: {msg}")
+                logger.warning(f"⚠️ [频率限制] 退避休眠 1.5 秒... | {msg}")
                 time.sleep(1.5)
                 res = self._request("POST", endpoint, params)
             elif "not exist" in msg or "not found" in msg or "already" in msg or "no order" in msg:
                 pass 
             else:
-                logger.warning(f"❌ [异常撤单] Endpoint: {endpoint} | Params: {params} | Resp: {res}")
+                logger.warning(f"❌ [异常撤单] Endpoint: {endpoint} | Resp: {res}")
         return res
 
     def get_available_balance(self, ccy="USDT"):
@@ -79,12 +78,13 @@ class DeepcoinClient:
         if reduce_only: params["reduceOnly"] = True
         return self._request("POST", "/trade/order", params)
 
-    # ================= 🚀 V9.7 升级：四重天网级撤单巡检 =================
+    # ================= 🚀 核武级一键撤单 (完全解决限价单残留) =================
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
         try:
+            # 深币的一键撤单接口要求格式为 ETHUSDT，不能带-SWAP
             base_symbol = symbol.replace("-SWAP", "").replace("-", "")
             
-            # 1. 撤销全部普通挂单[cite: 7]
+            # 1. 强力抹杀：一键撤销全部普通挂单（包含所有惹祸的 reduceOnly 止盈限价单）
             self._safe_cancel("/trade/swap/cancel-all", {
                 "InstrumentID": base_symbol,
                 "ProductGroup": "SwapU",
@@ -92,24 +92,24 @@ class DeepcoinClient:
                 "IsMergeMode": 1
             })
             
-            # 2. 一键撤销全部合约条件单[cite: 7]
+            # 2. 强力抹杀：一键撤销全部条件单/止损单
             self._safe_cancel("/trade/swap/cancel-trigger-all", {
                 "InstrumentID": base_symbol,
                 "ProductGroup": "SwapU",
                 "IsCrossMargin": -1,
                 "IsMergeMode": -1
             })
-            time.sleep(0.4)
             
-            # 3. 深度巡检普通单漏网之鱼[cite: 7]
-            pending = self._request("GET", "/trade/v2/orders-pending", {"instId": symbol, "index": 1, "limit": 100})
+            time.sleep(0.4) # 给交易所撤单留出撮合缓冲期
+            
+            # 3. 兜底扫描：针对特殊情况漏网之鱼进行 V2 逐点清理
+            pending = self._request("GET", "/trade/v2/orders-pending", {"instId": symbol, "limit": 50})
             if pending and 'data' in pending and isinstance(pending['data'], list):
                 for ord in pending['data']:
                     if ord.get("ordId"): 
                         self._safe_cancel("/trade/cancel-order", {"instId": symbol, "ordId": ord.get("ordId")})
-                    
-            # 4. 深度巡检条件单漏网之鱼[cite: 7]
-            trigger_pending = self._request("GET", "/trade/trigger-orders-pending", {"instType": "SWAP", "instId": symbol, "limit": 100})
+                        
+            trigger_pending = self._request("GET", "/trade/trigger-orders-pending", {"instType": "SWAP", "instId": symbol, "limit": 50})
             if trigger_pending and 'data' in trigger_pending and isinstance(trigger_pending['data'], list):
                 for t_ord in trigger_pending['data']:
                     if t_ord.get("ordId"): 
