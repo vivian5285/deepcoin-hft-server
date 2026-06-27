@@ -89,7 +89,6 @@ class DeepcoinClient:
         }
         return self._request("POST", "/trade/order", params)
 
-    # ==================== 核武级三层强力撤单（保持原有强逻辑） ====================
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
         try:
             base_symbol = symbol.replace("-SWAP", "").replace("-", "")
@@ -136,6 +135,5 @@ class DeepcoinClient:
                 time.sleep(1.5)
                 self._request("POST", endpoint, params)
         return res
-
 
 deepcoin_client = DeepcoinClient()
