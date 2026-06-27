@@ -27,9 +27,9 @@ class PositionSupervisor:
         self.leverage = 20
         self.face_value = 0.1
         
-        # 🚀 姐姐指定的参数：保留比例参考 0.0015，同时开启 3 USDT 绝对价差
-        self.fee_cover_margin = 0.0015 
-        self.micro_profit_usdt = 3.0   
+        # 🚀 姐姐指定的参数：开启 4.5 USDT 黄金甜点绝对价差
+        self.fee_cover_margin = 0.0015 # 保留比例锚点作参考
+        self.micro_profit_usdt = 4.5   # 覆盖约 3.5U 极限摩擦，稳拿 1.0U 纯利！
         
         self.radar_activated = False
         self.fee_cover_price = 0.0
@@ -47,7 +47,7 @@ class PositionSupervisor:
         self.current_sl = 0.0
         
         self.state_file = 'deepcoin_vps_state.json'
-        logger.info("🧠 深币 VPS [V9.8 极致微利 3 刀价差版] 已加载：摒弃比例浮动，锁定绝对利润收割！")
+        logger.info("🧠 深币 VPS [V9.9 黄金甜点微利版] 已加载：4.5U绝对价差，覆盖摩擦稳拿纯利！")
 
     def _save_state(self):
         try:
@@ -151,7 +151,7 @@ class PositionSupervisor:
             self.current_sl = self.watched_entry
             self.radar_activated = False
             
-            # 🚀 V9.8 核心修改：直接使用 ±3.0 USDT 物理绝对价差计算微利全平点位
+            # 🚀 V9.9 核心：使用 ±4.5 USDT 黄金甜点位绝对价差
             if self.current_side == "LONG":
                 self.fee_cover_price = round(self.watched_entry + self.micro_profit_usdt, 2)
                 close_side = "sell"
@@ -162,8 +162,8 @@ class PositionSupervisor:
             self.local_tp1 = 0.0 # 彻底摒弃波段逻辑
             self._save_state()
 
-            # 100%全量持仓，直接挂单至 3刀绝对微利价
-            logger.info(f"🎯 [微利挂单] 全仓 {self.watched_qty} 张直接布防于 3刀绝对微利价: {self.fee_cover_price}")
+            # 100%全量持仓，直接挂单至 4.5 刀绝对微利价
+            logger.info(f"🎯 [微利挂单] 全仓 {self.watched_qty} 张直接布防于 4.5 刀黄金甜点价: {self.fee_cover_price}")
             deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.fee_cover_price, self.watched_qty, reduce_only=True)
 
             # 推送定制战报
@@ -193,7 +193,7 @@ class PositionSupervisor:
 
                     if actual_qty == 0:
                         if self.watched_qty > 0: 
-                            self._close_all("🎯 极速微利：3刀纯利润差价限价单已被完全吃掉，落袋为安！")
+                            self._close_all("🎯 极速微利：4.5U纯利差价限价单已被完全吃掉，完美落袋！")
                         else: 
                             self.monitoring = False
                         break
