@@ -26,7 +26,10 @@ class PositionSupervisor:
 
         self.leverage = 20
         self.face_value = 0.1
-        self.fee_cover_margin = 0.0014 # 覆盖双边手续费+微利的安全空间（0.14%）
+        
+        # 🚀 姐姐指定的参数：保留比例参考 0.0015，同时开启 3 USDT 绝对价差
+        self.fee_cover_margin = 0.0015 
+        self.micro_profit_usdt = 3.0   
         
         self.radar_activated = False
         self.fee_cover_price = 0.0
@@ -44,7 +47,7 @@ class PositionSupervisor:
         self.current_sl = 0.0
         
         self.state_file = 'deepcoin_vps_state.json'
-        logger.info("🧠 深币 VPS [V9.7 双向持仓微利版] 已加载：覆盖手续费全平，彻底斩断波段利润！")
+        logger.info("🧠 深币 VPS [V9.8 极致微利 3 刀价差版] 已加载：摒弃比例浮动，锁定绝对利润收割！")
 
     def _save_state(self):
         try:
@@ -98,14 +101,12 @@ class PositionSupervisor:
         if pos and pos.get('size', 0) > 0: self._close_all(reason)
         else: dingtalk.report_deepcoin_clear(f"{reason}", "✅ 提前安全空仓")
 
-    # ================= 🚀 V9.7 战前双向原子持仓清理清道夫 =================
     def _handle_smart_entry(self, action):
         current_pos = self._get_active_position()
         curr_px = deepcoin_client.get_current_price(self.symbol)
 
         if current_pos and current_pos.get('size', 0) > 0:
             current_side = "LONG" if current_pos["posSide"] == "long" else "SHORT"
-            # 如果实盘持仓方向和新信号方向一致，先全平刷新阵地，实现高频刷佣
             if current_side == action: 
                 self._close_all("同方向新交易到达 (高频刷佣刷新阵地)")
             else: 
@@ -127,13 +128,11 @@ class PositionSupervisor:
             
             deepcoin_client.cancel_all_open_orders(self.symbol)
             time.sleep(0.4)
-            # 强平该交易对下所有双向持仓[cite: 7]
             deepcoin_client._request("POST", "/trade/batch-close-position", {"productGroup": "SwapU", "instId": self.symbol})
             time.sleep(1.2)
 
         self._open_position(action, curr_px)
 
-    # ================= 🚀 V9.7 核心：100% 仓位微利单全量挂单开仓 =================
     def _open_position(self, side, curr_px):
         if curr_px <= 0: return
         
@@ -152,19 +151,19 @@ class PositionSupervisor:
             self.current_sl = self.watched_entry
             self.radar_activated = False
             
-            # 计算微利全平的目标价格（覆盖双边手续费）
+            # 🚀 V9.8 核心修改：直接使用 ±3.0 USDT 物理绝对价差计算微利全平点位
             if self.current_side == "LONG":
-                self.fee_cover_price = round(self.watched_entry * (1 + self.fee_cover_margin), 2)
-                close_side = "sell" # 做多对应卖出平多[cite: 6]
+                self.fee_cover_price = round(self.watched_entry + self.micro_profit_usdt, 2)
+                close_side = "sell"
             else:
-                self.fee_cover_price = round(self.watched_entry * (1 - self.fee_cover_margin), 2)
-                close_side = "buy"  # 做空对应买入平空[cite: 6]
+                self.fee_cover_price = round(self.watched_entry - self.micro_profit_usdt, 2)
+                close_side = "buy"
             
-            self.local_tp1 = 0.0 # 微利流放弃大止盈波段
+            self.local_tp1 = 0.0 # 彻底摒弃波段逻辑
             self._save_state()
 
-            # 战术硬核：100%全量持仓，直接挂单至保本微利价（利用 reduce_only 确保只减仓不反向开仓）[cite: 6]
-            logger.info(f"🎯 [微利挂单] 全仓 {self.watched_qty} 张直接布防于保本微利价: {self.fee_cover_price}")
+            # 100%全量持仓，直接挂单至 3刀绝对微利价
+            logger.info(f"🎯 [微利挂单] 全仓 {self.watched_qty} 张直接布防于 3刀绝对微利价: {self.fee_cover_price}")
             deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.fee_cover_price, self.watched_qty, reduce_only=True)
 
             # 推送定制战报
@@ -187,16 +186,14 @@ class PositionSupervisor:
                     actual_qty = int(pos['size']) if pos else 0
                     actual_side = "LONG" if pos and pos.get('posSide') == "long" else "SHORT"
 
-                    # 双向持仓校验：防止发生方向错乱异常
                     if actual_qty > 0 and actual_side != self.last_tv_side:
                         self._close_all("强行对齐方向")
                         dingtalk.report_force_align(actual_side, self.last_tv_side)
                         break
 
                     if actual_qty == 0:
-                        # 好消息：仓位成功归零说明微利限价挂单已被交易所完美吃掉落袋
                         if self.watched_qty > 0: 
-                            self._close_all("🎯 极速微利：保本限价单已被完全吃掉，落袋为安！")
+                            self._close_all("🎯 极速微利：3刀纯利润差价限价单已被完全吃掉，落袋为安！")
                         else: 
                             self.monitoring = False
                         break
@@ -205,7 +202,6 @@ class PositionSupervisor:
                         self._close_all("🚨 人工违规加仓，强制对冲！")
                         break
 
-                    # 监测是否发生 Partial Fill (部分成交)
                     qty_reduced = False
                     if actual_qty < self.watched_qty:
                         logger.info(f"📦 监测到实盘仓位减少: {self.watched_qty} -> {actual_qty}，微利单已被部分蚕食")
@@ -215,7 +211,6 @@ class PositionSupervisor:
 
                     curr_px = deepcoin_client.get_current_price(self.symbol)
                     
-                    # 第一重护甲触发条件：价格越过微利线，或者仓位发生减少[cite: 2]
                     reached = (self.current_side == "LONG" and curr_px >= self.fee_cover_price) or \
                               (self.current_side == "SHORT" and curr_px <= self.fee_cover_price) or \
                               qty_reduced
@@ -226,7 +221,6 @@ class PositionSupervisor:
                         dingtalk.report_fee_cover_reached(self.current_side, self.watched_entry, self.fee_cover_price, actual_qty)
                         close_side, pos_side = ("sell", "long") if self.current_side == "LONG" else ("buy", "short")
                         
-                        # 触发双保险：利用原生条件单在持仓开仓均价挂上硬止损条件单保护[cite: 2, 6]
                         deepcoin_client._request("POST", "/trade/trigger-order", {
                             "instId": self.symbol, "productGroup": "Swap", "sz": str(int(actual_qty)),
                             "side": close_side, "posSide": pos_side, "isCrossMargin": "1",
@@ -234,7 +228,6 @@ class PositionSupervisor:
                             "mrgPosition": "merge", "tdMode": "cross"
                         })
 
-                    # 如果利润继续扩大，雷达推升开仓均价止损锁润[cite: 2]
                     if self.radar_activated:
                         moved = False
                         if self.current_side == "LONG" and curr_px > self.current_sl:
@@ -249,7 +242,6 @@ class PositionSupervisor:
                             time.sleep(0.3)
                             close_side, pos_side = ("sell", "long") if self.current_side == "LONG" else ("buy", "short")
                             
-                            # 重新补上限价微利单并平移条件硬止损[cite: 2]
                             deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, self.fee_cover_price, actual_qty, reduce_only=True)
                             
                             res = deepcoin_client._request("POST", "/trade/trigger-order", {
@@ -265,16 +257,13 @@ class PositionSupervisor:
             except Exception as e: logger.error(f"雷达异常: {e}")
             time.sleep(3.5)
 
-    # ================= 🚀 V9.7 6轮防漏阶梯核武平仓防线 =================
     def _close_all(self, reason=""):
         logger.warning(f"🔨 启动原子全平扫尾: {reason}")
         
-        # 强力清空盘口挂单，释放仓位冻结锁定状态[cite: 2]
         for clear_attempt in range(2):
             deepcoin_client.cancel_all_open_orders(self.symbol)
             time.sleep(0.4) 
         
-        # 阶梯式 6 轮彻底强平循环，给足部分成交物理恢复缓冲期[cite: 9]
         for round_num in range(6):
             pos = self._get_active_position()
             if not pos or pos.get('size', 0) == 0: 
@@ -283,19 +272,16 @@ class PositionSupervisor:
             qty = int(pos['size'])
             logger.info(f"🔨 第 {round_num+1} 轮清场: 剩余 {qty} 张，双向持仓强行爆破")
             
-            # 第一重：原生批量全平清场[cite: 7]
             res = deepcoin_client._request("POST", "/trade/batch-close-position", {
                 "productGroup": "SwapU", 
                 "instId": self.symbol
             })
             
-            # 第二重：极端网络状态下的市价单对冲平仓兜底[cite: 2]
             if not res or str(res.get("code", "")) != "0":
                 pos_side = pos['posSide'] 
                 close_side = "sell" if pos_side == "long" else "buy"
                 deepcoin_client.place_market_order(self.symbol, close_side, pos_side, qty, reduce_only=True)
             
-            # 阶梯休眠，专门解决极端行情下的 Partial Fill[cite: 9]
             time.sleep(1.8 if round_num < 3 else 2.5) 
                 
         deepcoin_client.cancel_all_open_orders(self.symbol) 
