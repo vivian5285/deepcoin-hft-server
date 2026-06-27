@@ -30,9 +30,19 @@ def send_alert(title, data_dict, header_color="#4B0082"):
     signed_url = _get_signed_url()
     if not signed_url: return
     body_text = "\n".join([f"- **{k}**: {v}" for k, v in data_dict.items()])
-    markdown_text = f"### <font color=\"{header_color}\">{title}</font>\n> **⏱ 军区时间**：`{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`  \n> **📍 阵地标识**：[ 中海资本 · 深币四档位雷达版 V11.1 ]\n\n---\n{body_text}\n\n---\n*🖨️ Quant AI · 深币紫金高频印钞机*"
-    try: requests.post(signed_url, json={"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}, timeout=6)
-    except Exception as e: logger.error(f"钉钉发送失败: {e}")
+    markdown_text = f"""### <font color="{header_color}">{title}</font>
+> **⏱ 军区时间**：`{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`
+> **📍 阵地标识**：[ 深币 Deepcoin · 四档位雷达版 V12.4 ]
+
+---
+{body_text}
+
+---
+*🟣 Quant AI · 深币紫金高频印钞机*"""
+    try:
+        requests.post(signed_url, json={"msgtype": "markdown", "markdown": {"title": title, "text": markdown_text}}, timeout=6)
+    except Exception as e:
+        logger.error(f"钉钉发送失败: {e}")
 
 def get_regime_name(regime_code):
     if regime_code == 1: return _gray("🧊 [1档] 极弱波段")
@@ -41,23 +51,23 @@ def get_regime_name(regime_code):
     if regime_code == 4: return _green("🚀 [4档] 强势主升")
     return "未知状态"
 
-def report_deepcoin_open(side, regime, atr, entry_price, tv_price, qty, tp_pxs):
+def report_deepcoin_open(side, regime, atr, entry_price, tv_price, qty, tp_pxs, tv_tps=None):
     side_str = _green("🟩 开多 (LONG)") if side == "LONG" else _red("🟥 开空 (SHORT)")
     slip_txt = f"{(entry_price - tv_price if side == 'LONG' else tv_price - entry_price):+.2f} 刀" if tv_price > 0 else "未知"
 
-    # 构建三档止盈显示
     tp_str = ""
-    for i, tp in enumerate(tp_pxs):
-        if tp > 0:
+    for i in range(len(tp_pxs)):
+        if tp_pxs[i] > 0:
             prefix = "" if tp_str == "" else "\n  ➔ "
-            tp_str += f"{prefix}TP{i+1} `{tp:.2f}`"
+            tv_val = f" (TV理论: `{tv_tps[i]:.2f}`)" if tv_tps and i < len(tv_tps) and tv_tps[i] > 0 else ""
+            tp_str += f"{prefix}TP{i+1} 实盘: `{tp_pxs[i]:.2f}`{tv_val}"
 
     send_alert("🔶 深币战神出击", {
         "🎛️ 持仓方向": side_str,
         "📊 市场强度": get_regime_name(regime),
         "💰 进场均价": f"**`{entry_price:.2f}`** USDT (滑点: **{slip_txt}**)",
         "📦 开仓数量": f"`{qty}` 张（20x杠杆）",
-        "🕸️ 分批止盈": _orange(tp_str),
+        "🕸️ 分批止盈对比": _orange(tp_str),
         "📏 ATR参考": _gray(f"{atr:.2f}"),
         "📡 雷达状态": _blue("已启动保本止损追踪")
     }, "#4B0082")
@@ -69,45 +79,31 @@ def report_radar_move(side, new_sl):
         "说明": _purple("价格有利，已上移止损锁定利润")
     }, "#0070C0")
 
-def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price, fee_price):
-    if action_type == "加仓":
-        title = "📈 人工加仓同步"
-        color = "#27AE60"
-    else:
-        title = "📉 人工减仓同步"
-        color = "#E67E22"
-
-    send_alert(title, {
-        "操作类型": _blue(action_type),
-        "原数量": f"`{old_qty}` 张",
-        "当前数量": f"`{new_qty}` 张",
+def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price):
+    action_color = _green("手动增仓") if "加仓" in action_type else _orange("手动部分减仓")
+    send_alert("🔄 深币阵地异动重置", {
+        "触发机制": _blue("🛡️ 智慧大脑态势感知同步"),
+        "实盘动作": action_color,
+        "数量变化": f"`{old_qty}` ➔ `{new_qty}` 张",
         "最新均价": f"**{new_entry_price:.2f}** USDT",
-        "止盈单": f"已重新挂载对应数量止盈单"
-    }, color)
-
-def report_manual_full_close():
-    send_alert("🛑 人工全平检测", {
-        "操作类型": _red("人工全平"),
-        "雷达动作": "已停止自动监控",
-        "说明": _purple("检测到人工全平，系统已退出自动管理")
-    }, "#C0392B")
+        "后续动作": "✅ 已无缝接管干预！重新按新逻辑挂出三档限价止盈"
+    }, "#FF9900")
 
 def report_force_align(real_side, expected_side):
-    send_alert("🚨 方向异常强制对齐", {
-        "实盘方向": f"`{real_side}`",
-        "TV期望方向": f"`{expected_side}`",
-        "处理结果": "**已强制全平对齐**"
+    send_alert("🚨 严重警告：方向强行物理对齐", {
+        "🚨 异常状况": _red("**实盘方向与 TV 战略指令发生严重背离！**"),
+        "🕵️ 现场方向": _red(real_side),
+        "🧠 策略指令": _blue(expected_side),
+        "⚡ 仲裁结果": _red("**已完成核武全平，强行保持干净状态。**")
     }, "#FF0000")
 
 def report_deepcoin_clear(reason, status_msg):
-    if "人工全平" in reason:
-        title, color = "🛑 人工全平", "#C0392B"
-    elif "方向异常" in reason:
-        title, color = "🚨 方向异常清仓", "#FF3333"
-    elif "保护性" in reason:
-        title, color = "🛡️ 保护性清仓", "#FF9900"
+    if "TP3" in reason or "止盈" in reason:
+        title, color = "🏆 完美胜利：深币大趋势吃满收网", "#00B050"
+    elif "保护" in reason:
+        title, color = "🛡️ 战术防守：保护平仓机制触发", "#FF9900"
     else:
-        title, color = "🧹 策略清仓", "#7F8C8D"
+        title, color = "🧹 先平后开 / 常规清场", "#7F8C8D"
 
     send_alert(title, {
         "清场原因": reason,
