@@ -38,7 +38,7 @@ class DeepcoinClient:
             logger.error(f"Deepcoin 请求失败 {endpoint}: {e}")
             return None
 
-    # ================= 🚀 V9.2 核心：智能安全撤单器 (Rate Limit 防护) =================
+    # ================= 🚀 V9.5 核心：智能安全撤单器 (Rate Limit 防护) =================
     def _safe_cancel(self, endpoint, params):
         res = self._request("POST", endpoint, params)
         if res and str(res.get("code", "")) != "0":
@@ -47,7 +47,7 @@ class DeepcoinClient:
             if "too many" in msg or "limit" in msg or "frequent" in msg:
                 logger.warning(f"⚠️ [频率限制] 触发 API 保护，系统退避休眠 1.5 秒... | 详情: {msg}")
                 time.sleep(1.5)
-                self._request("POST", endpoint, params) # 休眠后重试一次
+                res = self._request("POST", endpoint, params) # 休眠后重试一次
             # 2. 正常失败忽略 (订单已成交、不存在等，避免污染日志)
             elif "not exist" in msg or "not found" in msg or "already" in msg or "no order" in msg:
                 pass 
@@ -82,31 +82,43 @@ class DeepcoinClient:
         if reduce_only: params["reduceOnly"] = True
         return self._request("POST", "/trade/order", params)
 
-    # 🚀 四重无死角猎杀挂单
+    # ================= 🚀 V9.5 升级：四重天网级猎杀挂单 (适配深币最新原生接口) =================
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
         try:
-            # 1. 批量高级撤单
-            self._safe_cancel("/trade/cancel-batch-orders", {"instId": symbol})
-            self._safe_cancel("/trade/cancel-algos", {"instId": symbol})
-            time.sleep(0.3)
+            # 转换格式：ETH-USDT-SWAP -> ETHUSDT
+            base_symbol = symbol.replace("-SWAP", "").replace("-", "")
             
-            # 2. 逐点猎杀普通限价单
-            pending = self._request("GET", "/trade/orders-pending", {"instType": "SWAP", "instId": symbol})
-            if pending and 'data' in pending:
+            # 1. 新版原生：一键撤销全部普通挂单（全仓、合仓模式下 100% 覆盖）
+            self._safe_cancel("/trade/swap/cancel-all", {
+                "InstrumentID": base_symbol,
+                "ProductGroup": "SwapU",
+                "IsCrossMargin": 1,
+                "IsMergeMode": 1
+            })
+            
+            # 2. 新版原生：一键撤销全部合约条件单/止盈止损单（无死角清理）
+            self._safe_cancel("/trade/swap/cancel-trigger-all", {
+                "InstrumentID": base_symbol,
+                "ProductGroup": "SwapU",
+                "IsCrossMargin": -1, # -1 表示不过滤，强行大扫除
+                "IsMergeMode": -1
+            })
+            time.sleep(0.4) # 给交易所清空撮合单留出物理缓冲期
+            
+            # 3. 深度巡检：猎杀可能残留的普通限价单漏网之鱼（采用深币新版 V2 挂单接口）
+            pending = self._request("GET", "/trade/v2/orders-pending", {"instId": symbol, "index": 1, "limit": 100})
+            if pending and 'data' in pending and isinstance(pending['data'], list):
                 for ord in pending['data']:
-                    if ord.get("ordId"): self._safe_cancel("/trade/cancel-order", {"instId": symbol, "ordId": ord.get("ordId")})
+                    if ord.get("ordId"): 
+                        self._safe_cancel("/trade/cancel-order", {"instId": symbol, "ordId": ord.get("ordId")})
                     
-            # 3. 逐点猎杀 Algo 条件单
-            pending_algos = self._request("GET", "/trade/orders-algo-pending", {"instType": "SWAP", "instId": symbol})
-            if pending_algos and 'data' in pending_algos:
-                for algo in pending_algos['data']:
-                    if algo.get("algoId"): self._safe_cancel("/trade/cancel-algos", {"instId": symbol, "algoId": algo.get("algoId")})
-                    
-            # 4. 逐点猎杀 Trigger 触发单 (专治残留冻结额度)
-            trigger_pending = self._request("GET", "/trade/trigger-orders-pending", {"instType": "SWAP", "instId": symbol})
-            if trigger_pending and 'data' in trigger_pending:
+            # 4. 深度巡检：猎杀可能残留的条件/止盈止损漏网之鱼（采用深币专属监控接口）
+            trigger_pending = self._request("GET", "/trade/trigger-orders-pending", {"instType": "SWAP", "instId": symbol, "limit": 100})
+            if trigger_pending and 'data' in trigger_pending and isinstance(trigger_pending['data'], list):
                 for t_ord in trigger_pending['data']:
-                    if t_ord.get("ordId"): self._safe_cancel("/trade/cancel-trigger-order", {"instId": symbol, "ordId": t_ord.get("ordId")})
+                    if t_ord.get("ordId"): 
+                        self._safe_cancel("/trade/cancel-trigger-order", {"instId": symbol, "ordId": t_ord.get("ordId")})
+                        
         except Exception as e: 
             logger.error(f"撤单巡检异常: {e}")
 
