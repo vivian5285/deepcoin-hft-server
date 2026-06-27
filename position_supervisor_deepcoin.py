@@ -135,14 +135,15 @@ class PositionSupervisor:
         if curr_px <= 0:
             return
 
-        # 固定30%头寸
+        # ==================== 固定30%头寸 ====================
         MARGIN_RATIO = 0.30
         LEVERAGE = 20
         available_balance = deepcoin_client.get_available_balance()
         qty = max(int((available_balance * MARGIN_RATIO * LEVERAGE) / (curr_px * self.face_value)), 1)
+        # =================================================
 
         open_side, pos_side = ("buy", "long") if side == "LONG" else ("sell", "short")
-        logger.info(f"🚀 固定头寸开仓: {open_side} {qty}张（30% + 20x）")
+        logger.info(f"🚀 固定头寸开仓: {open_side} {qty}张（30%余额 + 20x杠杆）")
 
         deepcoin_client.place_market_order(self.symbol, open_side, pos_side, qty)
         time.sleep(2.0)
@@ -183,13 +184,13 @@ class PositionSupervisor:
                     actual_qty = int(pos['size']) if pos else 0
                     actual_side = "LONG" if pos and pos.get('posSide') == "long" else "SHORT"
 
-                    # 方向异常检测（保留原有强逻辑）
+                    # 方向异常检测（保留强逻辑）
                     if actual_qty > 0 and actual_side != self.last_tv_side:
                         self._close_all("强行对齐方向")
                         dingtalk.report_force_align(actual_side, self.last_tv_side)
                         break
 
-                    # ==================== 智能人工干预处理（新增） ====================
+                    # ==================== 智能人工干预处理 ====================
                     if actual_qty != self.watched_qty and actual_qty > 0:
                         old_qty = self.watched_qty
                         self.watched_qty = actual_qty
@@ -208,14 +209,14 @@ class PositionSupervisor:
                         deepcoin_client.place_limit_order(self.symbol, close_side, pos['posSide'], self.fee_cover_price, actual_qty, reduce_only=True)
 
                         if actual_qty > old_qty:
-                            dingtalk.report_system_alert("人工加仓同步", f"从 {old_qty} 张 → {actual_qty} 张，已更新并重新挂载4.5U止盈")
+                            dingtalk.report_manual_position_change("加仓", old_qty, actual_qty, self.watched_entry, self.fee_cover_price)
                         else:
-                            dingtalk.report_system_alert("人工减仓同步", f"从 {old_qty} 张 → {actual_qty} 张，已重新挂载4.5U止盈")
+                            dingtalk.report_manual_position_change("减仓", old_qty, actual_qty, self.watched_entry, self.fee_cover_price)
 
                     # 人工全平检测
                     if actual_qty == 0 and self.watched_qty > 0:
                         logger.info("🎯 检测到人工全平")
-                        dingtalk.report_deepcoin_clear("人工全平", "✅ 检测到人工全平，雷达停止监控")
+                        dingtalk.report_manual_full_close()
                         self.monitoring = False
                         self.watched_qty = 0
                         self._save_state()
