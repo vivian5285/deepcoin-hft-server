@@ -4,7 +4,7 @@ import os, threading, json, logging
 from flask import Flask, request, jsonify
 from position_supervisor_deepcoin import position_supervisor
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] Flask: %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] Flask-Deepcoin: %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -19,16 +19,23 @@ def webhook():
     if not data: return jsonify({"status": "error", "message": "Empty payload"}), 400
     if str(data.get("secret", "")).strip() != os.getenv("WEBHOOK_SECRET", "528586"): return jsonify({"status": "error", "message": "Invalid secret"}), 403
 
-    logger.info(f"[Webhook] 收到信号 → {data.get('action', 'UNKNOWN')}")
-    # 放进后台线程，秒回 TV，防止 TV 报 Timeout
-    threading.Thread(target=position_supervisor.handle_signal, args=(data,), daemon=True).start()
+    raw_action = data.get("action", "UNKNOWN")
+    
+    # 💡 优化：网关端本地控制台日志清晰解析平仓原因
+    if "CLOSE_PROTECT" in raw_action:
+        action_name = "保护性全平"
+        reason = raw_action.split("|")[1] if "|" in raw_action else "策略安全换防"
+        logger.info(f"[Webhook] 📥 收到信号 → 【{action_name}】 \| 原因: {reason} | Regime: {data.get('regime', 'N/A')}")
+    else:
+        logger.info(f"[Webhook] 📥 收到信号 → 【{raw_action}】 | Regime: {data.get('regime', 'N/A')}")
 
-    return jsonify({"status": "success", "message": "Signal processing started", "action": data.get("action")}), 200
+    # 异步秒回，防止 TV 报 Timeout[cite: 4]
+    try:
+        threading.Thread(target=position_supervisor.handle_signal, args=(data,), daemon=True).start()
+    except Exception as e:
+        logger.error(f"启动线程失败: {e}")
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({"status": "ok", "service": "deepcoin_webhook", "version": "v7.1-nuclear"}), 200
+    return jsonify({"status": "success", "message": "Signal received and processing started", "action": raw_action}), 200
 
 if __name__ == '__main__':
-    logger.info("🚀 深币 Webhook 服务启动（强壮及时响应版）")
-    app.run(host='127.0.0.1', port=5004, debug=False, threaded=True)
+    app.run(host='127.0.0.1', port=5004, debug=False, threaded=True) # 绑定深币 5004 端口[cite: 4]
