@@ -1,94 +1,55 @@
 #!/bin/bash
 # ==========================================
-# 深币紫金双擎 - 工业级并发自动化部署 v8.0
+# 深币双擎 - 工业级并发自动化部署 (核武清场版)
 # ==========================================
-
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
 
 PORT=5004
-LOG_FILE="app.log"
+LOG_FILE="supervisor_deepcoin.log"
+GATEWAY_LOG="gateway_deepcoin.log"
 
-echo -e "${CYAN}====================================================${NC}"
-echo -e "${CYAN}🚀 开始部署并重启 深币极速印钞机 (Gunicorn 升级版)...${NC}"
-echo -e "${CYAN}====================================================${NC}"
+echo -e "\033[1;36m=== 正在执行深币系统详细部署与环境重置 ===\033[0m"
 
-# ==========================================
-# 1. 强制清理端口和历史幽灵进程
-# ==========================================
-echo -e "\n${YELLOW}🧹 [1/4] 正在执行核弹级清场，释放端口 $PORT...${NC}"
-if command -v fuser >/dev/null 2>&1; then
-    fuser -k -9 $PORT/tcp >/dev/null 2>&1
-else
-    lsof -t -i:$PORT | xargs -r kill -9 >/dev/null 2>&1
-fi
-pkill -9 -f "app.py" >/dev/null 2>&1
-pkill -9 -f "gunicorn.*$PORT" >/dev/null 2>&1
+# [1/5] 彻底清理审计
+echo -e "\033[0;33m[1/5] 正在执行端口清理与残留进程剔除...\033[0m"
+fuser -k -9 $PORT/tcp 2>/dev/null
+pkill -9 -f "app.py" 2>/dev/null
+pkill -9 -f "gunicorn.*$PORT" 2>/dev/null
+pkill -9 -f "position_supervisor_deepcoin.py" 2>/dev/null
 sleep 2
+echo "  -> 历史进程与端口已完成强制清理。"
 
-if lsof -Pi :$PORT -sTCP:LISTEN -t >/dev/null 2>&1 ; then
-    echo -e "${RED}❌ 致命错误：端口 $PORT 依然被死死占用！${NC}"
-    exit 1
-else
-    echo -e "${GREEN}✅ 阵地已打扫完毕，端口 $PORT 纯净无污染。${NC}"
-fi
+# [2/5] 依赖检查
+echo -e "\033[0;33m[2/5] 检查并安装高级核心依赖...\033[0m"
+source venv/bin/activate 2>/dev/null || echo "未找到 venv，使用全局环境"
+pip install -q requests flask gunicorn python-dotenv
+echo "  -> 核心依赖已确保就绪。"
 
-# ==========================================
-# 2. 激活虚拟环境 & 补充 Gunicorn
-# ==========================================
-echo -e "\n${YELLOW}📦 [2/4] 正在加载兵器库 (虚拟环境)...${NC}"
-if [ -f "venv/bin/activate" ]; then
-    source venv/bin/activate
-    pip install -q gunicorn  # 确保深币也安装了保时捷引擎
-    echo -e "${GREEN}✅ Python 虚拟环境及 Gunicorn 核心就绪。${NC}"
-else
-    echo -e "${RED}❌ 找不到 venv/bin/activate！${NC}"
-    exit 1
-fi
+# [3/5] 启动审计
+echo -e "\033[0;33m[3/5] 正在启动毫秒级守护进程...\033[0m"
+mkdir -p logs
+nohup gunicorn --workers 2 --threads 4 -b 0.0.0.0:$PORT app:app > "$GATEWAY_LOG" 2>&1 &
+nohup python3 -u position_supervisor_deepcoin.py > "$LOG_FILE" 2>&1 &
+echo "  -> 深币网关(Gunicorn)与大脑(Supervisor)已点火启动。"
 
-# ==========================================
-# 3. 后台守护启动服务 (Gunicorn 10线程爆发)
-# ==========================================
-echo -e "\n${YELLOW}⚙️ [3/4] 正在启动毫秒级并发大脑 ...${NC}"
-# 🚀 核心升级：替换 python3 app.py 为 Gunicorn
-nohup gunicorn --workers 1 --threads 10 -b 127.0.0.1:$PORT app:app > $LOG_FILE 2>&1 &
-APP_PID=$!
+# [4/5] 详细健康自检
+echo -e "\033[0;33m[4/5] 正在进行详细健康与回路审计 (等待3秒)...\033[0m"
+sleep 3
 
-echo -e "${YELLOW}⏳ 正在等待引擎点火预热 (4秒)...${NC}"
-sleep 4
+echo -e "  -> 核心进程监听审计:"
+ps -ef | grep -E "gunicorn|position_supervisor_deepcoin" | grep -v grep | awk '{print "     PID: "$2", 进程: "$8" "$9}'
 
-# ==========================================
-# 4. 终极健康状态自检
-# ==========================================
-echo -e "\n${YELLOW}🔬 [4/4] 执行服务健康与高并发回路自检...${NC}"
-
-if ps -p $APP_PID > /dev/null; then
-    if lsof -Pi :$PORT -sTCP:LISTEN -t >/dev/null 2>&1 ; then
-        echo -e "${GREEN}🎉 部署大获成功！深币工业级网关已在后台隐身运行。${NC}"
-        
-        # 回路测探
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:$PORT/webhook -H "Content-Type: application/json" -d '{"secret":"528586","action":"PING"}')
-        if [ "$HTTP_CODE" == "200" ]; then
-            echo -e "   ${GREEN}✅ 本地穿透测试 200 OK，大脑通信回路极度畅通。${NC}"
-        else
-            echo -e "   ${RED}❌ 网关回路异常 (HTTP: $HTTP_CODE)${NC}"
-        fi
-
-        echo -e "${CYAN}📍 进程守护 PID: $APP_PID | 📡 监听端口: $PORT${NC}"
-        echo -e "\n${YELLOW}📄 最近日志：${NC}"
-        tail -n 5 $LOG_FILE
+if netstat -tuln | grep -q ":$PORT "; then
+    echo -e "  -> 端口状态: \033[0;32mLISTEN (Port $PORT)\033[0m"
+    echo -e "  -> 本地网关回路测试:"
+    HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:$PORT/webhook -H "Content-Type: application/json" -d '{"secret": "528586", "action": "PING"}')
+    if [ "$HTTP_STATUS" -eq 200 ]; then
+        echo -e "     \033[0;32m✅ 本地网关 200 OK，大脑通信回路极度畅通。\033[0m"
     else
-        echo -e "${RED}❌ 警告：进程活着但未监听 $PORT！报错详情：${NC}"
-        tail -n 10 $LOG_FILE
+        echo -e "     \033[0;31m⚠️ 本地网关响应异常，HTTP 状态码: $HTTP_STATUS\033[0m"
     fi
 else
-    echo -e "${RED}❌ 启动失败！程序点火后意外坠毁。${NC}"
-    tail -n 10 $LOG_FILE
-    exit 1
+    echo -e "  -> 端口状态: \033[0;31mFAILED (请检查 gateway_deepcoin.log)\033[0m"
 fi
-echo -e "\n${GREEN}====================================================${NC}"
-echo -e "${GREEN}✅ Deepcoin 自动化运维并发升级完毕！${NC}"
-echo -e "${GREEN}====================================================${NC}"
+
+echo -e "\n\033[1;36m=== 🚀 深币(Deepcoin)系统实盘升级完成 ===\033[0m"
+echo -e "可以通过 \`tail -f supervisor_deepcoin.log\` 查看深币交易日志。\n"
