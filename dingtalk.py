@@ -188,18 +188,32 @@ def report_supervisor_close(reason, verify_note=""):
     send_alert(title, data)
 
 
-def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_price, verify_note=""):
+def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_price,
+                            verify_note="", tp_matched=0, tp_expected=0):
     radar_txt = (
         _p(f"已激活 (硬防线 `{sl_price:.2f}`)", P_LIGHT)
         if radar_active else _p("待命 (未达 TP1 激活阈值)", P_MUTED)
     )
+    expected = tp_expected or sum(1 for t in tv_tps if t > 0)
+    if expected > 0 and tp_matched >= expected:
+        action_txt = f"{VERIFY_TAG} | 已撤旧单 → 补挂 TP123 → 恢复哨兵"
+        action_color = P_MAIN
+    elif tp_matched > 0:
+        action_txt = f"⚠️ 部分成功 | 止盈 {tp_matched}/{expected} 档已挂 → 恢复哨兵"
+        action_color = P_ACCENT
+    elif expected > 0:
+        action_txt = "❌ 止盈补挂失败 | 持仓已接管但限价 TP 未挂上，请人工核查"
+        action_color = P_DEEP
+    else:
+        action_txt = f"{VERIFY_TAG} | 已撤旧单 → 恢复哨兵（无 TP 价格记录）"
+        action_color = P_MAIN
     data = {
         "🎛️ 实盘方向": _p(side, P_LIGHT if side == "LONG" else P_DEEP),
         "📦 核实头寸": _p(f"**{qty}** {UNIT_LABEL} @ `{entry:.2f}`", P_MAIN),
         "📊 恢复档位": get_regime_name(regime),
         "🕸️ TP123 布防": _p(_format_tp_compare(tv_tps, tv_tps), P_ACCENT),
         "📡 雷达状态": radar_txt,
-        "✅ 接管动作": _p(f"{VERIFY_TAG} | 已撤旧单 → 补挂 TP123 → 恢复哨兵", P_MAIN),
+        "✅ 接管动作": _p(action_txt, action_color),
     }
     if verify_note:
         data["🔍 核查明细"] = _p(verify_note, P_MUTED)
