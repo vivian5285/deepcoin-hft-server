@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 WS_PUBLIC_SWAP = "wss://stream.deepcoin.com/streamlet/trade/public/swap?platform=api&version=v2"
 WS_PRIVATE = "wss://stream.deepcoin.com/v1/private"
 
-CLIENT_VERSION = "v13.4-nuclear-guard"
+CLIENT_VERSION = "v13.4.1-qtyfix"
 # 公开 instruments 接口失败时的硬编码兜底
 SYMBOL_TICK_FALLBACK = {
     "ETH-USDT-SWAP": "0.01",
@@ -273,10 +273,17 @@ class DeepcoinClient:
             )
         return res
 
+    @staticmethod
+    def format_contract_sz(qty):
+        """API 数量可能是 int、float 或 '1.000000' 字符串"""
+        if qty is None or qty == "":
+            return "0"
+        return str(int(float(qty)))
+
     def place_market_order(self, symbol, side, pos_side, qty, reduce_only=False, td_mode="cross", mrg_position="merge"):
         params = {
             "instId": symbol, "tdMode": td_mode, "side": side, "posSide": pos_side,
-            "ordType": "market", "sz": str(int(qty)), "mrgPosition": mrg_position,
+            "ordType": "market", "sz": self.format_contract_sz(qty), "mrgPosition": mrg_position,
         }
         if reduce_only:
             params["reduceOnly"] = True
@@ -288,7 +295,7 @@ class DeepcoinClient:
         for px_str in px_variants:
             params = {
                 "instId": symbol, "tdMode": td_mode, "side": side, "posSide": pos_side,
-                "ordType": "limit", "sz": str(int(qty)), "px": px_str, "mrgPosition": mrg_position,
+                "ordType": "limit", "sz": self.format_contract_sz(qty), "px": px_str, "mrgPosition": mrg_position,
             }
             if reduce_only:
                 params["reduceOnly"] = True
@@ -317,7 +324,7 @@ class DeepcoinClient:
             if product_group == "SwapU":
                 product_group = "Swap"
         params = {
-            "instId": symbol, "productGroup": product_group, "sz": str(int(sz)),
+            "instId": symbol, "productGroup": product_group, "sz": self.format_contract_sz(sz),
             "side": side, "posSide": pos_side, "isCrossMargin": str(is_cross_margin),
             "orderType": order_type,
             "triggerPrice": self.format_price(trigger_price, symbol),
