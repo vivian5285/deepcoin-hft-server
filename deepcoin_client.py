@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 WS_PUBLIC_SWAP = "wss://stream.deepcoin.com/streamlet/trade/public/swap?platform=api&version=v2"
 WS_PRIVATE = "wss://stream.deepcoin.com/v1/private"
 
+CLIENT_VERSION = "v13.4-nuclear-guard"
+# 公开 instruments 接口失败时的硬编码兜底
+SYMBOL_TICK_FALLBACK = {
+    "ETH-USDT-SWAP": "0.01",
+    "BTC-USDT-SWAP": "0.1",
+}
+
 
 class DeepcoinClient:
     def __init__(self):
@@ -171,8 +178,16 @@ class DeepcoinClient:
                 f"minSz={info.get('minSz')}"
             )
             return info
-        logger.warning(f"[合约规格] 无法获取 {symbol} instruments，使用默认 tickSz=0.01")
-        return {}
+        fallback_tick = SYMBOL_TICK_FALLBACK.get(symbol, "0.01")
+        logger.warning(f"[合约规格] 无法拉取 {symbol} instruments，兜底 tickSz={fallback_tick}")
+        return {"tickSz": fallback_tick, "instId": symbol}
+
+    def get_tick_size(self, symbol="ETH-USDT-SWAP") -> str:
+        info = self.get_instrument_info(symbol)
+        tick = str(info.get("tickSz", "") or "").strip()
+        if not tick or tick == "0":
+            tick = SYMBOL_TICK_FALLBACK.get(symbol, "0.01")
+        return tick
 
     @staticmethod
     def _tick_decimal_places(tick_str: str) -> int:
@@ -185,9 +200,8 @@ class DeepcoinClient:
         return len(tick_str.split(".", 1)[1])
 
     def format_price(self, px, symbol="ETH-USDT-SWAP"):
-        """将价格对齐到交易所 tickSz 整数倍，避免 sCode=48 PriceNotOnTick"""
-        info = self.get_instrument_info(symbol)
-        tick_str = str(info.get("tickSz", "0.01")).strip() or "0.01"
+        """将价格对齐到 tickSz 整数倍；1517.4 → '1517.40'，避免 sCode=48 PriceNotOnTick"""
+        tick_str = self.get_tick_size(symbol)
         try:
             tick = Decimal(tick_str)
         except InvalidOperation:
@@ -215,6 +229,18 @@ class DeepcoinClient:
         if result != raw:
             logger.info(f"[tick对齐] {symbol} {raw} → {result} (tickSz={tick_str})")
         return result
+
+    def _price_submit_variants(self, px, symbol="ETH-USDT-SWAP"):
+        """PriceNotOnTick 时依次尝试多种合法字符串格式"""
+        primary = self.format_price(px, symbol)
+        seen = set()
+        variants = []
+        for candidate in (primary, primary.rstrip("0").rstrip(".") if "." in primary else primary,
+                          f"{float(primary):.2f}", f"{float(primary):.1f}", str(int(round(float(primary))))):
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                variants.append(candidate)
+        return variants
 
     def get_position_info(self, symbol="ETH-USDT-SWAP"):
         return self._request("GET", "/account/positions", {"instType": "SWAP", "instId": symbol})
@@ -257,22 +283,30 @@ class DeepcoinClient:
         return self.place_order(params)
 
     def place_limit_order(self, symbol, side, pos_side, px, qty, reduce_only=False, td_mode="cross", mrg_position="merge"):
-        px_str = self.format_price(px, symbol)
-        params = {
-            "instId": symbol, "tdMode": td_mode, "side": side, "posSide": pos_side,
-            "ordType": "limit", "sz": str(int(qty)), "px": px_str, "mrgPosition": mrg_position,
-        }
-        if reduce_only:
-            params["reduceOnly"] = True
-        for attempt in range(3):
-            res = self.place_order(params)
-            if res and self._is_success(res):
-                ord_id = (res.get("data") or {}).get("ordId", "")
-                logger.info(f"[限价单成功] {side} {pos_side} {qty}张 @ {px_str} ordId={ord_id}")
-                return res
-            if attempt < 2:
-                time.sleep(0.4 * (attempt + 1))
-        return res
+        px_variants = self._price_submit_variants(px, symbol)
+        last_res = None
+        for px_str in px_variants:
+            params = {
+                "instId": symbol, "tdMode": td_mode, "side": side, "posSide": pos_side,
+                "ordType": "limit", "sz": str(int(qty)), "px": px_str, "mrgPosition": mrg_position,
+            }
+            if reduce_only:
+                params["reduceOnly"] = True
+            logger.info(f"[限价单提交] {side} {pos_side} {qty}张 px={px_str} (原始={px})")
+            for attempt in range(2):
+                res = self.place_order(params)
+                last_res = res
+                if res and self._is_success(res):
+                    ord_id = (res.get("data") or {}).get("ordId", "")
+                    logger.info(f"[限价单成功] {side} {pos_side} {qty}张 @ {px_str} ordId={ord_id}")
+                    return res
+                data = (res or {}).get("data") or {}
+                smsg = str(data.get("sMsg", ""))
+                if smsg and "PriceNotOnTick" not in smsg and "tick" not in smsg.lower():
+                    return res
+                if attempt == 0:
+                    time.sleep(0.3)
+        return last_res
 
     def place_trigger_order(self, symbol, side, pos_side, sz, trigger_price, order_type="market",
                             td_mode="cross", mrg_position="merge", is_cross_margin="1",
@@ -285,11 +319,12 @@ class DeepcoinClient:
         params = {
             "instId": symbol, "productGroup": product_group, "sz": str(int(sz)),
             "side": side, "posSide": pos_side, "isCrossMargin": str(is_cross_margin),
-            "orderType": order_type, "triggerPrice": str(trigger_price),
+            "orderType": order_type,
+            "triggerPrice": self.format_price(trigger_price, symbol),
             "mrgPosition": mrg_position, "tdMode": td_mode, "triggerPxType": trigger_px_type,
         }
         if order_type == "limit" and price is not None:
-            params["price"] = str(price)
+            params["price"] = self.format_price(price, symbol)
         return self._request("POST", "/trade/trigger-order", params)
 
     def set_position_sltp(self, symbol, pos_side, sl_trigger_px=None, tp_trigger_px=None,
@@ -385,6 +420,14 @@ class DeepcoinClient:
             else:
                 logger.warning(f"❌ [异常撤单] Endpoint: {endpoint} | Resp: {res}")
         return res
+
+    def cancel_trigger_order(self, symbol, ord_id):
+        """POST /deepcoin/trade/cancel-trigger-order — 撤销单笔条件单"""
+        if not ord_id:
+            return None
+        return self._safe_cancel("/trade/cancel-trigger-order", {
+            "instId": symbol, "ordId": ord_id,
+        })
 
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
         """一键撤单 + 条件单一键撤单 + 兜底逐笔撤销"""
@@ -524,6 +567,7 @@ class DeepcoinClient:
 
 
 deepcoin_client = DeepcoinClient()
+logger.info(f"DeepcoinClient {CLIENT_VERSION} 已加载")
 try:
     deepcoin_client.get_instrument_info("ETH-USDT-SWAP")
 except Exception as _e:
