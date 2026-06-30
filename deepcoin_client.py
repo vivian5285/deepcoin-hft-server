@@ -10,6 +10,7 @@ import requests
 import time
 import threading
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -33,11 +34,26 @@ class DeepcoinClient:
         self._ws_thread = None
         self._ws_running = False
         self._ws_callbacks = {}
+        self._instrument_cache = {}
 
     # ── 签名与请求 ──────────────────────────────────────────────
 
     def _get_timestamp(self):
-        return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
+        """官方要求 UTC ISO8601，如 2020-12-08T09:08:57.715Z（与 VPS 系统时区无关）"""
+        now = datetime.now(timezone.utc)
+        ms = int(now.microsecond / 1000)
+        return now.strftime("%Y-%m-%dT%H:%M:%S") + f".{ms:03d}Z"
+
+    def _build_query_string(self, params: dict) -> str:
+        if not params:
+            return ""
+        return urlencode(params)
+
+    def _build_request_path(self, endpoint: str, params: dict = None, method: str = "GET") -> str:
+        if method.upper() == "GET" and params:
+            qs = self._build_query_string(params)
+            return f"{endpoint}?{qs}" if qs else endpoint
+        return endpoint
 
     def _sign(self, timestamp: str, method: str, request_path: str, body: str = ""):
         message = (str(timestamp) + str(method.upper()) + str(request_path) + str(body)).encode('utf-8')
@@ -49,16 +65,14 @@ class DeepcoinClient:
             endpoint = "/deepcoin" + (endpoint if endpoint.startswith("/") else "/" + endpoint)
         return endpoint
 
-    def _request(self, method: str, endpoint: str, params: dict = None):
+    def _request(self, method: str, endpoint: str, params: dict = None, _retry: int = 0):
         if not self.api_key or not self.secret_key:
+            logger.error("Deepcoin API Key/Secret 未配置，请检查 .env")
             return None
         endpoint = self._normalize_endpoint(endpoint)
         timestamp = self._get_timestamp()
         body_str = json.dumps(params, separators=(',', ':')) if params and method.upper() != "GET" else ""
-        request_path = (
-            f"{endpoint}?{'&'.join([f'{k}={v}' for k, v in params.items()])}"
-            if method.upper() == "GET" and params else endpoint
-        )
+        request_path = self._build_request_path(endpoint, params, method)
         signature = self._sign(timestamp, method, request_path, body_str)
         headers = {
             "Content-Type": "application/json",
@@ -70,9 +84,17 @@ class DeepcoinClient:
         try:
             resp = requests.request(
                 method.upper(), f"{self.base_url}{request_path}",
-                data=body_str if body_str else None, headers=headers, timeout=10,
+                data=body_str if body_str else None, headers=headers, timeout=15,
             )
-            return resp.json()
+            data = resp.json()
+            if isinstance(data, dict) and str(data.get("code", "")) != "0":
+                msg = str(data.get("msg", ""))
+                logger.error(f"Deepcoin API 错误 {method} {request_path} | code={data.get('code')} msg={msg}")
+                # 签名/时间戳类错误自动重试一次
+                if _retry == 0 and any(k in msg.lower() for k in ("timestamp", "sign", "time", "expired")):
+                    time.sleep(0.3)
+                    return self._request(method, endpoint, params, _retry=1)
+            return data
         except Exception as e:
             logger.error(f"Deepcoin 请求失败 {endpoint}: {e}")
             return None
@@ -136,6 +158,29 @@ class DeepcoinClient:
                 return self._price_cache[symbol]
         return 0.0
 
+    def get_instrument_info(self, symbol="ETH-USDT-SWAP"):
+        if symbol in self._instrument_cache:
+            return self._instrument_cache[symbol]
+        res = self._public_request("/market/instruments", {"instType": "SWAP", "instId": symbol})
+        if res and str(res.get("code")) == "0" and res.get("data"):
+            info = res["data"][0]
+            self._instrument_cache[symbol] = info
+            return info
+        return {}
+
+    def format_price(self, px, symbol="ETH-USDT-SWAP"):
+        info = self.get_instrument_info(symbol)
+        tick = info.get("tickSz", "0.01")
+        try:
+            tick_f = float(tick)
+            if tick_f >= 1:
+                decimals = 0
+            else:
+                decimals = max(0, len(tick.rstrip('0').split('.')[-1]) if '.' in tick else 0)
+            return f"{float(px):.{decimals}f}"
+        except (TypeError, ValueError):
+            return f"{float(px):.2f}"
+
     def get_position_info(self, symbol="ETH-USDT-SWAP"):
         return self._request("GET", "/account/positions", {"instType": "SWAP", "instId": symbol})
 
@@ -160,7 +205,11 @@ class DeepcoinClient:
         res = self._request("POST", "/trade/order", params)
         if res and not self._is_success(res):
             data = res.get("data") or {}
-            logger.error(f"下单失败: sCode={data.get('sCode')} sMsg={data.get('sMsg')} msg={res.get('msg')}")
+            logger.error(
+                f"下单失败: instId={params.get('instId')} side={params.get('side')} "
+                f"px={params.get('px')} sz={params.get('sz')} "
+                f"sCode={data.get('sCode')} sMsg={data.get('sMsg')} msg={res.get('msg')}"
+            )
         return res
 
     def place_market_order(self, symbol, side, pos_side, qty, reduce_only=False, td_mode="cross", mrg_position="merge"):
@@ -173,13 +222,22 @@ class DeepcoinClient:
         return self.place_order(params)
 
     def place_limit_order(self, symbol, side, pos_side, px, qty, reduce_only=False, td_mode="cross", mrg_position="merge"):
+        px_str = self.format_price(px, symbol)
         params = {
             "instId": symbol, "tdMode": td_mode, "side": side, "posSide": pos_side,
-            "ordType": "limit", "sz": str(int(qty)), "px": str(px), "mrgPosition": mrg_position,
+            "ordType": "limit", "sz": str(int(qty)), "px": px_str, "mrgPosition": mrg_position,
         }
         if reduce_only:
             params["reduceOnly"] = True
-        return self.place_order(params)
+        for attempt in range(3):
+            res = self.place_order(params)
+            if res and self._is_success(res):
+                ord_id = (res.get("data") or {}).get("ordId", "")
+                logger.info(f"[限价单成功] {side} {pos_side} {qty}张 @ {px_str} ordId={ord_id}")
+                return res
+            if attempt < 2:
+                time.sleep(0.4 * (attempt + 1))
+        return res
 
     def place_trigger_order(self, symbol, side, pos_side, sz, trigger_price, order_type="market",
                             td_mode="cross", mrg_position="merge", is_cross_margin="1",
@@ -244,13 +302,28 @@ class DeepcoinClient:
         })
 
     def get_pending_orders(self, symbol="ETH-USDT-SWAP"):
-        """GET /deepcoin/trade/v2/orders-pending — 未成交限价单"""
-        res = self._request("GET", "/trade/v2/orders-pending", {
-            "instId": symbol, "index": 1, "limit": 100,
-        })
-        if res and isinstance(res.get("data"), list):
-            return res["data"]
-        return []
+        """GET /deepcoin/trade/v2/orders-pending — 未成交限价单（支持按品种或全账户查询）"""
+        seen = set()
+        merged = []
+        for params in (
+            {"instId": symbol, "index": 1, "limit": 100},
+            {"index": 1, "limit": 100},
+        ):
+            res = self._request("GET", "/trade/v2/orders-pending", params)
+            if not res or str(res.get("code", "")) != "0":
+                if res:
+                    logger.warning(
+                        f"挂单查询失败 params={params} code={res.get('code')} msg={res.get('msg')}"
+                    )
+                continue
+            for o in res.get("data") or []:
+                if symbol and o.get("instId") != symbol:
+                    continue
+                oid = o.get("ordId")
+                if oid and oid not in seen:
+                    seen.add(oid)
+                    merged.append(o)
+        return merged
 
     def get_trigger_orders_pending(self, symbol="ETH-USDT-SWAP"):
         """GET /deepcoin/trade/trigger-orders-pending — 未触发条件单"""
