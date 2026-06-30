@@ -107,7 +107,30 @@ def _format_tp_compare(tp_pxs, tv_tps=None):
     return tp_str or "暂无有效 TP 价格"
 
 
-def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime, tv_tps=None, verify_note=""):
+def _format_tp_audit(audit, tv_tps=None):
+    if not audit or not audit.get("levels"):
+        return _format_tp_compare(tv_tps or [], tv_tps)
+    lines = []
+    for lv in audit["levels"]:
+        if lv.get("price", 0) <= 0:
+            continue
+        prefix = "" if not lines else "\n\n  ➔ "
+        if lv.get("status") == "ok":
+            lines.append(
+                f"{prefix}TP{lv['level']} ✅ `{lv['actual_qty']}` 张 @ `{lv['price']:.2f}` "
+                f"(比例期望 `{lv['qty']}` 张)"
+            )
+        else:
+            lines.append(
+                f"{prefix}TP{lv['level']} ❌ 期望 `{lv['qty']}` 张 @ `{lv['price']:.2f}` "
+                f"→ 状态 `{lv['status']}`"
+                + (f" 实盘 `{lv.get('actual_qty', 0)}` 张" if lv.get("actual_qty") else "")
+            )
+    return "".join(lines) or "暂无有效 TP 审计"
+
+
+def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime, tv_tps=None,
+                           verify_note="", tp_audit=None):
     side_str = _p("🟣 开多 (LONG)", P_LIGHT) if side == "LONG" else _p("🟪 开空 (SHORT)", P_DEEP)
     slip_txt = (
         f"{(entry_price - tv_price if side == 'LONG' else tv_price - entry_price):+.2f} 刀"
@@ -119,7 +142,10 @@ def report_supervisor_open(side, entry_price, tv_price, qty, tp_pxs, atr, regime
         "📊 市场强度": get_regime_name(regime),
         "💰 进场成本": _p(f"**{entry_price:.2f}** USDT (滑点: **{slip_txt}**)", P_MAIN),
         "📦 唯一头寸": _p(f"**{qty}** {UNIT_LABEL} ({EXCHANGE_LABEL} {LEVERAGE_LABEL} 稳健火力)", P_ACCENT),
-        "🕸️ 止盈布防比对": _p(_format_tp_compare(tp_pxs, tv_tps), P_LIGHT),
+        "🕸️ 止盈布防比对": _p(
+            _format_tp_audit(tp_audit, tv_tps) if tp_audit else _format_tp_compare(tp_pxs, tv_tps),
+            P_LIGHT,
+        ),
         "📏 波动参考": _p(f"ATR = {atr:.4f}", P_MUTED),
         "📡 哨兵状态": _p(f"🟢 {VERIFY_TAG} | 限价 TP123 已挂，雷达待命", P_MAIN),
     }
@@ -141,15 +167,18 @@ def report_intervention(qty, entry_px, new_sl, action_msg, verify_note=""):
     send_alert("📈 捷报：追踪雷达锁死趋势利润", data, P_DEEP)
 
 
-def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price, verify_note=""):
+def report_manual_position_change(action_type, old_qty, new_qty, new_entry_price,
+                                  verify_note="", tp_audit=None):
     action_txt = _p("手动增仓", P_LIGHT) if "加仓" in action_type else _p("手动部分减仓", P_ACCENT)
     data = {
         "触发机制": _p("🛡️ 智慧大脑态势感知同步", P_MAIN),
         "实盘动作": action_txt,
         "数量变化": _p(f"`{old_qty}` ➔ `{new_qty}` {UNIT_LABEL}", P_ACCENT),
         "最新均价": _p(f"**{new_entry_price:.2f}** USDT", P_MAIN),
-        "后续动作": _p(f"{VERIFY_TAG} | 已重挂最新比例限价 TP123", P_LIGHT),
+        "后续动作": _p(f"{VERIFY_TAG} | 已按最新仓位比例智能重挂 TP123", P_LIGHT),
     }
+    if tp_audit:
+        data["🕸️ TP123 审计"] = _p(_format_tp_audit(tp_audit), P_ACCENT)
     if verify_note:
         data["🔍 核查明细"] = _p(verify_note, P_MUTED)
     send_alert("🔄 深币阵地异动重置", data, P_ACCENT)
@@ -189,29 +218,43 @@ def report_supervisor_close(reason, verify_note=""):
 
 
 def report_recover_takeover(side, qty, entry, tv_tps, regime, radar_active, sl_price,
-                            verify_note="", tp_matched=0, tp_expected=0):
+                            verify_note="", tp_matched=0, tp_expected=0, tp_audit=None,
+                            last_tv_signal=None):
     radar_txt = (
         _p(f"已激活 (硬防线 `{sl_price:.2f}`)", P_LIGHT)
         if radar_active else _p("待命 (未达 TP1 激活阈值)", P_MUTED)
     )
     expected = tp_expected or sum(1 for t in tv_tps if t > 0)
     if expected > 0 and tp_matched >= expected:
-        action_txt = f"{VERIFY_TAG} | 已撤旧单 → 补挂 TP123 → 恢复哨兵"
+        action_txt = f"{VERIFY_TAG} | 头寸+TV对账 → 比例 TP123 已对齐 → 恢复哨兵"
         action_color = P_MAIN
     elif tp_matched > 0:
-        action_txt = f"⚠️ 部分成功 | 止盈 {tp_matched}/{expected} 档已挂 → 恢复哨兵"
+        action_txt = f"⚠️ 部分对齐 | 止盈 {tp_matched}/{expected} 档 (价量审计未全过) → 恢复哨兵"
         action_color = P_ACCENT
     elif expected > 0:
-        action_txt = "❌ 止盈补挂失败 | 持仓已接管但限价 TP 未挂上，请人工核查"
+        action_txt = "❌ 止盈补挂失败 | 持仓已接管但限价 TP 未对齐，请人工核查"
         action_color = P_DEEP
     else:
-        action_txt = f"{VERIFY_TAG} | 已撤旧单 → 恢复哨兵（无 TP 价格记录）"
+        action_txt = f"{VERIFY_TAG} | 已接管 → 恢复哨兵（无 TP 价格记录，请等 TV 信号）"
         action_color = P_MAIN
+
+    tv_ref = ""
+    if last_tv_signal:
+        tv_ref = (
+            f"{last_tv_signal.get('action', '?')} "
+            f"R{last_tv_signal.get('regime', '?')} "
+            f"@{last_tv_signal.get('ts', '')}"
+        )
+
     data = {
         "🎛️ 实盘方向": _p(side, P_LIGHT if side == "LONG" else P_DEEP),
         "📦 核实头寸": _p(f"**{qty}** {UNIT_LABEL} @ `{entry:.2f}`", P_MAIN),
         "📊 恢复档位": get_regime_name(regime),
-        "🕸️ TP123 布防": _p(_format_tp_compare(tv_tps, tv_tps), P_ACCENT),
+        "📡 最新 TV 信号": _p(tv_ref or "无日志记录", P_MUTED),
+        "🕸️ TP123 比例审计": _p(
+            _format_tp_audit(tp_audit, tv_tps) if tp_audit else _format_tp_compare(tv_tps, tv_tps),
+            P_ACCENT,
+        ),
         "📡 雷达状态": radar_txt,
         "✅ 接管动作": _p(action_txt, action_color),
     }
