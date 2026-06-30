@@ -70,22 +70,26 @@ class DeepcoinClient:
             "ordType": "market", "sz": str(int(qty)), "mrgPosition": "merge"
         }
         if reduce_only:
-            params["reduceOnly"] = True
+            params["reduceOnly"] = "true" # 🚀 修复深币极度严格的强类型要求
         return self._request("POST", "/trade/order", params)
 
     def place_limit_order(self, symbol, side, pos_side, px, qty, reduce_only=False):
         params = {
             "instId": symbol, "tdMode": "cross", "side": side, "posSide": pos_side,
-            "ordType": "limit", "sz": str(int(qty)), "px": str(px), "mrgPosition": "merge"
+            "ordType": "limit", "sz": str(int(qty)), 
+            "px": str(round(float(px), 2)), # 🚀 核心修复：强行砍到2位小数，防止深币因精度越界拒单
+            "mrgPosition": "merge"
         }
         if reduce_only:
-            params["reduceOnly"] = True
+            params["reduceOnly"] = "true"
         return self._request("POST", "/trade/order", params)
 
     def place_stop_market_order(self, symbol, side, pos_side, stop_price):
         params = {
             "instId": symbol, "tdMode": "cross", "side": side, "posSide": pos_side,
-            "ordType": "stop_market", "stopPrice": str(stop_price), "closePosition": "true"
+            "ordType": "stop_market", 
+            "stopPrice": str(round(float(stop_price), 2)), # 🚀 核心修复：止损价强行截断到2位小数
+            "closePosition": "true"
         }
         return self._request("POST", "/trade/order", params)
 
