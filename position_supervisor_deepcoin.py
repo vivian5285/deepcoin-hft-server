@@ -99,10 +99,26 @@ class PositionSupervisor:
     def _collect_limit_tp_prices(self):
         prices = []
         for o in deepcoin_client.get_pending_orders(self.symbol):
+            if o.get("ordType") not in ("limit", "post_only", None):
+                continue
             px = float(o.get("px", 0) or 0)
             if px > 0:
                 prices.append(round(px, 2))
         return sorted(prices)
+
+    def _expected_tp_count(self, tp_pxs=None):
+        tp_pxs = tp_pxs if tp_pxs is not None else self.tv_tps
+        return sum(1 for t in tp_pxs if t > 0)
+
+    def _wait_tp_hung(self, tp_pxs, retries=5, delay=0.8):
+        expected = self._expected_tp_count(tp_pxs)
+        matched, pending = 0, []
+        for _ in range(retries):
+            matched, pending = self._count_matched_tp_orders(tp_pxs)
+            if expected == 0 or matched >= expected:
+                return matched, pending
+            time.sleep(delay)
+        return matched, pending
 
     def _count_matched_tp_orders(self, tp_pxs, tolerance=1.0):
         pending_prices = self._collect_limit_tp_prices()
@@ -135,7 +151,7 @@ class PositionSupervisor:
         return checks_fn()
 
     def _calculate_tp_quantities(self, total_qty: int, ratios: list) -> tuple:
-        """深币最小 1 张限制：确保 TP 分档不丢单"""
+        """深币最小 1 张限制 + 余数吸收：qty1+qty2+qty3 恒等于 total_qty"""
         if total_qty <= 0:
             return 0, 0, 0
 
@@ -158,7 +174,18 @@ class PositionSupervisor:
         if qty3 == 0 and remaining >= 2 and qty2 > 1:
             qty3, qty2 = 1, remaining - 1
 
+        assert qty1 + qty2 + qty3 == total_qty, f"TP 分档不守恒: {qty1}+{qty2}+{qty3}!={total_qty}"
         return qty1, qty2, qty3
+
+    def _resolve_live_qty(self, fallback_qty: int) -> int:
+        """挂 reduceOnly 前重新读取交易所落账张数，避免冻结/部分成交导致数量漂移"""
+        pos = self._get_active_position()
+        if pos and int(pos.get("size", 0)) > 0:
+            live = int(pos["size"])
+            if live != fallback_qty:
+                logger.info(f"📐 实盘张数校正: 账本 {fallback_qty} → 交易所 {live}")
+            return live
+        return fallback_qty
 
     def handle_signal(self, payload):
         raw_action = payload.get("action", "").upper()
@@ -237,29 +264,18 @@ class PositionSupervisor:
             self._protect_and_monitor(real_qty, pos['entry_price'])
 
     def _protect_and_monitor(self, qty, entry_price):
-        close_side = "sell" if self.current_side == "LONG" else "buy"
-        pos_side = "long" if self.current_side == "LONG" else "short"
-        ratios = self.regime_settings[self.regime]["ratios"]
-
-        qty1, qty2, qty3 = self._calculate_tp_quantities(qty, ratios)
         tp_pxs = self.tv_tps
         self.current_sl = entry_price
-
-        if qty1 > 0 and tp_pxs[0] > 0:
-            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[0], qty1, reduce_only=True)
-        if qty2 > 0 and tp_pxs[1] > 0:
-            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[1], qty2, reduce_only=True)
-        if qty3 > 0 and tp_pxs[2] > 0:
-            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[2], qty3, reduce_only=True)
-
         self.best_price = entry_price
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         self._save_state()
 
+        self._rebuild_defenses(qty, entry_price, dynamic_sl=None)
+
         verified = self._wait_verify(lambda: self._verify_position(self.current_side))
         if verified:
-            matched, pending_prices = self._count_matched_tp_orders(tp_pxs)
-            expected = sum(1 for t in tp_pxs if t > 0)
+            matched, pending_prices = self._wait_tp_hung(tp_pxs)
+            expected = self._expected_tp_count(tp_pxs)
             verify_note = (
                 f"持仓 {verified['size']}张 @ {verified['entry_price']:.2f} | "
                 f"限价止盈 {matched}/{expected} 档 | 挂单价 {pending_prices}"
@@ -269,6 +285,11 @@ class PositionSupervisor:
                 verified['size'], tp_pxs, self.current_atr, self.regime, self.tv_tps,
                 verify_note=verify_note,
             )
+            if expected > 0 and matched < expected:
+                dingtalk.report_system_alert(
+                    "开仓后限价止盈未全部挂上",
+                    f"{self.current_side} {verified['size']}张 | 仅 {matched}/{expected} 档 | 挂单价 {pending_prices}",
+                )
         else:
             logger.warning("开仓钉钉跳过：实盘持仓核查未通过")
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
@@ -300,7 +321,7 @@ class PositionSupervisor:
 
                         logger.info(f"🔄 [智慧大脑] 感知到仓位变化: {old_qty} ➔ {real_amt}，重新重构防线！")
                         deepcoin_client.cancel_all_open_orders(self.symbol)
-                        time.sleep(0.5)
+                        time.sleep(1.0)
 
                         sl_to_pass = None
                         if (self.current_side == "LONG" and self.current_sl > self.watched_entry) or \
@@ -310,7 +331,7 @@ class PositionSupervisor:
 
                         verified = self._verify_position(self.current_side)
                         if verified and int(verified['size']) == real_amt:
-                            matched, pending_prices = self._count_matched_tp_orders(self.tv_tps)
+                            matched, pending_prices = self._wait_tp_hung(self.tv_tps)
                             verify_note = (
                                 f"核实 {real_amt}张 @ {verified['entry_price']:.2f} | "
                                 f"重挂止盈 {matched} 档 | 挂单价 {pending_prices}"
@@ -392,39 +413,68 @@ class PositionSupervisor:
         pos_side = "long" if self.current_side == "LONG" else "short"
         ratios = self.regime_settings[self.regime]["ratios"]
 
-        qty1, qty2, qty3 = self._calculate_tp_quantities(qty, ratios)
-        tp_pxs = self.tv_tps
+        live_qty = self._resolve_live_qty(qty)
+        if live_qty <= 0:
+            logger.warning(f"重建防线跳过：交易所无可用持仓 (传入 {qty} 张)")
+            return 0
+        if live_qty != qty:
+            self.watched_qty = live_qty
+            self._save_state()
 
-        if qty1 > 0 and tp_pxs[0] > 0:
-            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[0], qty1, reduce_only=True)
-        if qty2 > 0 and tp_pxs[1] > 0:
-            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[1], qty2, reduce_only=True)
-        if qty3 > 0 and tp_pxs[2] > 0:
-            deepcoin_client.place_limit_order(self.symbol, close_side, pos_side, tp_pxs[2], qty3, reduce_only=True)
+        qty1, qty2, qty3 = self._calculate_tp_quantities(live_qty, ratios)
+        tp_pxs = self.tv_tps
+        placed = 0
+
+        logger.info(
+            f"🕸️ 补挂 TP123: 总 {live_qty}张 → TP1={qty1} TP2={qty2} TP3={qty3} "
+            f"(合计 {qty1 + qty2 + qty3})"
+        )
+
+        for q, px in ((qty1, tp_pxs[0]), (qty2, tp_pxs[1]), (qty3, tp_pxs[2])):
+            if q > 0 and px > 0:
+                res = deepcoin_client.place_limit_order(
+                    self.symbol, close_side, pos_side, px, q, reduce_only=True,
+                )
+                if res and deepcoin_client._is_success(res):
+                    placed += 1
+                time.sleep(0.35)
 
         if dynamic_sl:
+            sl_qty = self._resolve_live_qty(live_qty)
             deepcoin_client.place_trigger_order(
-                self.symbol, close_side, pos_side, qty, dynamic_sl,
+                self.symbol, close_side, pos_side, sl_qty, dynamic_sl,
                 order_type="market", td_mode="cross", mrg_position="merge",
             )
+        return placed
 
     def _close_all(self, reason="", force_align=None):
-        """三重把关之二：TV 全平/保护性全平 → 全平后撤单，耐心等待下次 TV"""
+        """三重把关之二：TV 全平/保护性全平 → 先撤单释放冻结仓位，6 轮阶梯强平至归零"""
         deepcoin_client.cancel_all_open_orders(self.symbol)
         time.sleep(0.5)
         closed_successfully = False
 
-        for _ in range(5):
+        for round_i in range(6):
             pos = self._get_active_position()
             if not pos or int(pos.get("size", 0)) == 0:
                 closed_successfully = True
                 break
 
             close_side = "sell" if pos["posSide"] == "long" else "buy"
+            live_sz = int(pos["size"])
+            logger.info(f"🔪 强平第 {round_i + 1}/6 轮: {close_side} {live_sz}张 reduceOnly")
             deepcoin_client.place_market_order(
-                self.symbol, close_side, pos["posSide"], int(pos["size"]), reduce_only=True,
+                self.symbol, close_side, pos["posSide"], live_sz, reduce_only=True,
             )
             time.sleep(1.5)
+
+        if not closed_successfully:
+            residual = self._get_active_position()
+            residual_sz = int(residual["size"]) if residual else 0
+            logger.error(f"❌ 6 轮强平后仍有残单: {residual_sz}张")
+            dingtalk.report_system_alert(
+                "强平未完全归零",
+                f"6 轮市价平仓后仍剩 {residual_sz} 张，请人工核查 Deepcoin 盘口",
+            )
 
         self.monitoring = False
         self.watched_qty = 0
@@ -486,8 +536,20 @@ class PositionSupervisor:
                 )
 
                 deepcoin_client.cancel_all_open_orders(self.symbol)
-                time.sleep(0.5)
-                self._rebuild_defenses(real_amt, self.watched_entry, dynamic_sl=sl_to_pass)
+                time.sleep(1.0)
+
+                expected = self._expected_tp_count(self.tv_tps)
+                for attempt in range(3):
+                    placed = self._rebuild_defenses(real_amt, self.watched_entry, dynamic_sl=sl_to_pass)
+                    logger.info(f"重启补挂 TP 尝试 {attempt + 1}/3，API 返回成功 {placed}/{expected} 笔")
+                    matched, pending_prices = self._wait_tp_hung(self.tv_tps, retries=4, delay=0.8)
+                    if expected == 0 or matched >= expected:
+                        break
+                    logger.warning(
+                        f"重启补挂 TP 未完成 ({matched}/{expected})，挂单价 {pending_prices}，准备重试"
+                    )
+                    time.sleep(1.0)
+
                 self.monitoring = True
                 self._save_state()
 
@@ -495,7 +557,6 @@ class PositionSupervisor:
 
                 verified = self._verify_position(self.current_side)
                 if verified and int(verified['size']) == real_amt:
-                    matched, pending_prices = self._count_matched_tp_orders(self.tv_tps)
                     verify_note = (
                         f"接管 {real_amt}张 @ {verified['entry_price']:.2f} | "
                         f"止盈 {matched} 档 | 挂单价 {pending_prices}"
@@ -504,7 +565,15 @@ class PositionSupervisor:
                         self.current_side, real_amt, verified['entry_price'],
                         self.tv_tps, self.regime, radar_active, self.current_sl,
                         verify_note=verify_note,
+                        tp_matched=matched,
+                        tp_expected=expected,
                     )
+                    if expected > 0 and matched < expected:
+                        dingtalk.report_system_alert(
+                            "重启接管后限价止盈未挂上",
+                            f"{self.current_side} {real_amt}张 @ {verified['entry_price']:.2f} | "
+                            f"仅 {matched}/{expected} 档 | 挂单价 {pending_prices} | 请查 logs/deepcoin_brain.log",
+                        )
                 else:
                     logger.warning("重启接管钉钉跳过：实盘核查未通过")
                 logger.info("  -> 🎉 实盘阵地接管完毕，TP123 及雷达系统已复位。")
