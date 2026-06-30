@@ -21,7 +21,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEEPCOIN_SUPERVISOR_VERSION = "v13.4.1-qtyfix"
+DEEPCOIN_SUPERVISOR_VERSION = "v13.4.3-ws-radar"
+SENTINEL_POLL_NORMAL = 6
+SENTINEL_POLL_ARMING = 3
+SENTINEL_POLL_RADAR = 2
 TV_JOURNAL = "logs/deepcoin_tv_journal.jsonl"
 OPEN_JOURNAL = "logs/deepcoin_open_journal.jsonl"
 
@@ -810,6 +813,7 @@ class PositionSupervisor:
         self.watched_qty, self.watched_entry, self.monitoring = qty, entry_price, True
         self._save_state()
 
+        self._ensure_price_ws()
         self._rebuild_defenses(qty, entry_price, dynamic_sl=None)
 
         verified = self._wait_verify(lambda: self._verify_position(self.current_side))
@@ -843,7 +847,86 @@ class PositionSupervisor:
             logger.warning("开仓钉钉跳过：实盘持仓核查未通过")
         threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
+    def _ensure_price_ws(self):
+        deepcoin_client.start_public_price_ws(self.symbol)
+
+    def _radar_activation_progress(self, curr_px):
+        if curr_px <= 0 or not self.watched_entry:
+            return 0.0
+        tp1_dist = abs(self.tv_tps[0] - self.watched_entry) if self.tv_tps[0] > 0 else self.current_atr * 1.5
+        activation_ratio = self.regime_settings[self.regime]["activation"]
+        if self.current_side == "LONG":
+            required = self.watched_entry + tp1_dist * activation_ratio
+            span = required - self.watched_entry
+            if span <= 0:
+                return 0.0
+            return max(0.0, min(1.0, (curr_px - self.watched_entry) / span))
+        required = self.watched_entry - tp1_dist * activation_ratio
+        span = self.watched_entry - required
+        if span <= 0:
+            return 0.0
+        return max(0.0, min(1.0, (self.watched_entry - curr_px) / span))
+
+    def _sentinel_poll_sec(self, curr_px=0.0):
+        if self._is_radar_active():
+            return SENTINEL_POLL_RADAR
+        if curr_px > 0 and self._radar_activation_progress(curr_px) >= 0.5:
+            return SENTINEL_POLL_ARMING
+        return SENTINEL_POLL_NORMAL
+
+    def _process_radar_trailing(self, real_amt, curr_px):
+        tp1_dist = abs(self.tv_tps[0] - self.watched_entry) if self.tv_tps[0] > 0 else self.current_atr * 1.5
+        cfg = self.regime_settings[self.regime]
+        activation_ratio = cfg["activation"]
+        trail_atr_multiplier = cfg["trail_offset"]
+
+        if self.current_side == "LONG":
+            required = self.watched_entry + tp1_dist * activation_ratio
+            if curr_px < required:
+                return False
+        else:
+            required = self.watched_entry - tp1_dist * activation_ratio
+            if curr_px > required:
+                return False
+
+        trail_offset = self.current_atr * trail_atr_multiplier
+        fee_buffer = self.watched_entry * 0.0015
+
+        if self.current_side == "LONG":
+            breakeven_floor = self.watched_entry + fee_buffer
+            new_sl = max(round(self.best_price - trail_offset, 2), breakeven_floor)
+            if new_sl > self.current_sl + 1.0:
+                self.current_sl = new_sl
+                self._save_state()
+                self._realign_radar_defenses(real_amt, self.watched_entry, new_sl)
+                if self._has_trigger_sl_near(new_sl):
+                    dingtalk.report_intervention(
+                        real_amt, self.watched_entry, new_sl,
+                        f"🚀 档位{self.regime} 雷达实时跟踪：保本盾推升至 {new_sl:.2f}",
+                        verify_note=f"条件止损 @ {new_sl:.2f} | 持仓 {real_amt}张 | 轮询 {SENTINEL_POLL_RADAR}s",
+                    )
+                    return True
+                logger.warning(f"雷达钉钉跳过：条件止损 @{new_sl} 实盘核查未通过")
+        else:
+            breakeven_floor = self.watched_entry - fee_buffer
+            new_sl = min(round(self.best_price + trail_offset, 2), breakeven_floor)
+            if self.current_sl >= self.watched_entry or new_sl < self.current_sl - 1.0:
+                self.current_sl = new_sl
+                self._save_state()
+                self._realign_radar_defenses(real_amt, self.watched_entry, new_sl)
+                if self._has_trigger_sl_near(new_sl):
+                    dingtalk.report_intervention(
+                        real_amt, self.watched_entry, new_sl,
+                        f"🚀 档位{self.regime} 雷达实时跟踪：保本顶线下压至 {new_sl:.2f}",
+                        verify_note=f"条件止损 @ {new_sl:.2f} | 持仓 {real_amt}张 | 轮询 {SENTINEL_POLL_RADAR}s",
+                    )
+                    return True
+                logger.warning(f"雷达钉钉跳过：条件止损 @{new_sl} 实盘核查未通过")
+        return False
+
     def _sentinel_loop(self):
+        """哨兵：持仓/TP 防线 + 雷达移动保本（自适应轮询 2~6 秒）"""
+        last_px = 0.0
         while self.monitoring:
             try:
                 if not self._lock.acquire(timeout=2.0):
@@ -919,75 +1002,30 @@ class PositionSupervisor:
 
                     curr_px = deepcoin_client.get_current_price(self.symbol)
                     if curr_px <= 0:
+                        curr_px = last_px
+                    else:
+                        last_px = curr_px
+                    if curr_px <= 0:
                         continue
                     if self.current_side == "LONG":
                         self.best_price = max(self.best_price, curr_px)
                     else:
                         self.best_price = min(self.best_price, curr_px)
 
-                    tp1_dist = abs(self.tv_tps[0] - self.watched_entry) if self.tv_tps[0] > 0 else self.current_atr * 1.5
-                    cfg = self.regime_settings[self.regime]
-                    activation_ratio = cfg["activation"]
-                    trail_atr_multiplier = cfg["trail_offset"]
-
-                    if self.current_side == "LONG":
-                        required = self.watched_entry + tp1_dist * activation_ratio
-                        has_moved_favorably = curr_px >= required
-                    else:
-                        required = self.watched_entry - tp1_dist * activation_ratio
-                        has_moved_favorably = curr_px <= required
-
-                    if has_moved_favorably:
-                        trail_offset = self.current_atr * trail_atr_multiplier
-                        fee_buffer = self.watched_entry * 0.0015
-
-                        if self.current_side == "LONG":
-                            breakeven_floor = self.watched_entry + fee_buffer
-                            new_sl = max(round(self.best_price - trail_offset, 2), breakeven_floor)
-                            if new_sl > self.current_sl + 1.0:
-                                self.current_sl = new_sl
-                                self._save_state()
-                                self._realign_radar_defenses(
-                                    real_amt, self.watched_entry, new_sl,
-                                )
-                                if self._has_trigger_sl_near(new_sl):
-                                    verify_note = (
-                                        f"条件止损 @ {new_sl:.2f} | 持仓 {real_amt}张 | "
-                                        f"TP保留增量补挂"
-                                    )
-                                    dingtalk.report_intervention(
-                                        real_amt, self.watched_entry, new_sl,
-                                        f"🚀 档位{self.regime} 雷达激活：保本盾升起，锁润底线物理推升！",
-                                        verify_note=verify_note,
-                                    )
-                                else:
-                                    logger.warning(f"雷达钉钉跳过：条件止损 @{new_sl} 实盘核查未通过")
-                        else:
-                            breakeven_floor = self.watched_entry - fee_buffer
-                            new_sl = min(round(self.best_price + trail_offset, 2), breakeven_floor)
-                            if self.current_sl >= self.watched_entry or new_sl < self.current_sl - 1.0:
-                                self.current_sl = new_sl
-                                self._save_state()
-                                self._realign_radar_defenses(
-                                    real_amt, self.watched_entry, new_sl,
-                                )
-                                if self._has_trigger_sl_near(new_sl):
-                                    verify_note = (
-                                        f"条件止损 @ {new_sl:.2f} | 持仓 {real_amt}张 | "
-                                        f"TP保留增量补挂"
-                                    )
-                                    dingtalk.report_intervention(
-                                        real_amt, self.watched_entry, new_sl,
-                                        f"🚀 档位{self.regime} 雷达激活：保本盾降下，锁润顶线物理下压！",
-                                        verify_note=verify_note,
-                                    )
-                                else:
-                                    logger.warning(f"雷达钉钉跳过：条件止损 @{new_sl} 实盘核查未通过")
+                    progress = self._radar_activation_progress(curr_px)
+                    if self._is_radar_active() or progress >= 1.0:
+                        self._process_radar_trailing(real_amt, curr_px)
+                    elif progress >= 0.5 and self._scan_ticks % 5 == 0:
+                        logger.info(
+                            f"📡 雷达预热: 进度 {progress:.0%} | 现价 {curr_px:.2f} | "
+                            f"轮询 {SENTINEL_POLL_ARMING}s"
+                        )
                 finally:
                     self._lock.release()
             except Exception as e:
                 logger.error(f"哨兵异常: {e}")
-            time.sleep(6)
+            if self.monitoring:
+                time.sleep(self._sentinel_poll_sec(last_px))
 
     def _rebuild_defenses(self, qty, entry, dynamic_sl=None):
         close_side = "sell" if self.current_side == "LONG" else "buy"
@@ -1133,6 +1171,7 @@ class PositionSupervisor:
 
                 self.monitoring = True
                 self._save_state()
+                self._ensure_price_ws()
                 self._record_open_log(
                     self.current_side, real_amt, self.watched_entry, source="recover",
                 )
