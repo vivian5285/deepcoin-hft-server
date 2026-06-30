@@ -4,7 +4,7 @@ import os, threading, json, logging
 from flask import Flask, request, jsonify
 from position_supervisor_deepcoin import position_supervisor
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] Flask-Deepcoin: %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] Flask: %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -22,19 +22,20 @@ def webhook():
     raw_action = data.get("action", "UNKNOWN")
     reason = data.get("reason", "策略安全换防")
     
-    # 💡 优化：网关端本地控制台日志清晰解析平仓原因
     if "CLOSE_PROTECT" in raw_action:
         logger.info(f"[Webhook] 📥 收到信号 → 【保护性全平】 | 原因: {reason} | Regime: {data.get('regime', 'N/A')}")
     else:
         logger.info(f"[Webhook] 📥 收到信号 → 【{raw_action}】 | Regime: {data.get('regime', 'N/A')}")
 
-    # 异步秒回，防止 TV 报 Timeout
-    try:
-        threading.Thread(target=position_supervisor.handle_signal, args=(data,), daemon=True).start()
-    except Exception as e:
-        logger.error(f"启动线程失败: {e}")
+    threading.Thread(target=position_supervisor.handle_signal, args=(data,), daemon=True).start()
+    return jsonify({"status": "success", "message": "Signal processing started", "action": raw_action}), 200
 
-    return jsonify({"status": "success", "message": "Signal received and processing started", "action": raw_action}), 200
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({"status": "ok", "service": "deepcoin_webhook", "version": "v12.2"}), 200
 
 if __name__ == '__main__':
-    app.run(host='127.0.0.1', port=5004, debug=False, threaded=True) # 绑定深币 5004 端口
+    host_ip = os.getenv("FLASK_HOST", "0.0.0.0")
+    port_num = int(os.getenv("FLASK_PORT", 5004))
+    logger.info(f"🚀 深币 Webhook 服务启动 -> {host_ip}:{port_num}")
+    app.run(host=host_ip, port=port_num, debug=False, threaded=True)
