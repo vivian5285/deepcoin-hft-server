@@ -21,7 +21,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEEPCOIN_SUPERVISOR_VERSION = "v13.4-nuclear-guard"
+DEEPCOIN_SUPERVISOR_VERSION = "v13.4.1-qtyfix"
 TV_JOURNAL = "logs/deepcoin_tv_journal.jsonl"
 OPEN_JOURNAL = "logs/deepcoin_open_journal.jsonl"
 
@@ -193,25 +193,35 @@ class PositionSupervisor:
         except Exception as e:
             logger.error(f"保存状态失败: {e}")
 
+    @staticmethod
+    def _safe_qty(val, default=0):
+        """Deepcoin API 常返回 '1.000000' 字符串，须先 float 再 int"""
+        if val is None or val == "":
+            return default
+        try:
+            return int(float(val))
+        except (TypeError, ValueError):
+            return default
+
     def _get_active_position(self):
         res = deepcoin_client.get_position_info(self.symbol)
         if res and 'data' in res:
             for p in res['data']:
-                if int(p.get("pos", 0)) > 0:
+                if self._safe_qty(p.get("pos")) > 0:
                     return {
-                        "size": int(p.get("pos")),
-                        "entry_price": round(float(p.get("avgPx", p.get("price", 0))), 2),
+                        "size": self._safe_qty(p.get("pos")),
+                        "entry_price": round(float(p.get("avgPx", p.get("price", 0)) or 0), 2),
                         "posSide": p.get("posSide", "long").lower(),
                     }
         return None
 
     def _verify_flat(self):
         pos = self._get_active_position()
-        return pos is None or int(pos.get("size", 0)) == 0
+        return pos is None or self._safe_qty(pos.get("size")) == 0
 
     def _verify_position(self, expected_side=None):
         pos = self._get_active_position()
-        if not pos or int(pos.get("size", 0)) <= 0:
+        if not pos or self._safe_qty(pos.get("size")) <= 0:
             return None
         side = "LONG" if pos["posSide"] == "long" else "SHORT"
         if expected_side and side != expected_side:
@@ -250,7 +260,7 @@ class PositionSupervisor:
             orders.append({
                 "orderId": o.get("ordId"),
                 "price": round(px, 2),
-                "qty": int(o.get("sz", 0) or 0),
+                "qty": self._safe_qty(o.get("sz")),
             })
         return orders
 
@@ -692,8 +702,8 @@ class PositionSupervisor:
     def _resolve_live_qty(self, fallback_qty: int) -> int:
         """挂 reduceOnly 前重新读取交易所落账张数，避免冻结/部分成交导致数量漂移"""
         pos = self._get_active_position()
-        if pos and int(pos.get("size", 0)) > 0:
-            live = int(pos["size"])
+        if pos and self._safe_qty(pos.get("size")) > 0:
+            live = self._safe_qty(pos["size"])
             if live != fallback_qty:
                 logger.info(f"📐 实盘张数校正: 账本 {fallback_qty} → 交易所 {live}")
             return live
@@ -789,7 +799,7 @@ class PositionSupervisor:
         pos = self._get_active_position()
         if pos and pos.get('size', 0) > 0:
             self.current_side = action
-            real_qty = int(pos['size'])
+            real_qty = self._safe_qty(pos['size'])
             self.initial_qty = real_qty
             self._protect_and_monitor(real_qty, pos['entry_price'])
 
@@ -805,7 +815,7 @@ class PositionSupervisor:
         verified = self._wait_verify(lambda: self._verify_position(self.current_side))
         if verified:
             result = self._smart_realign_defenses(
-                int(verified["size"]), verified["entry_price"],
+                self._safe_qty(verified["size"]), verified["entry_price"],
                 reason="开仓后二次核查",
             )
             matched, expected = result["matched"], result["expected"]
@@ -815,7 +825,7 @@ class PositionSupervisor:
                 f"限价止盈 {matched}/{expected} 档 | {self._format_audit_summary(audit)}"
             )
             self._record_open_log(
-                self.current_side, int(verified["size"]), verified["entry_price"], source="open",
+                self.current_side, self._safe_qty(verified["size"]), verified["entry_price"], source="open",
             )
             dingtalk.report_supervisor_open(
                 self.current_side, verified['entry_price'], self.tv_price,
@@ -840,7 +850,7 @@ class PositionSupervisor:
                     continue
                 try:
                     pos = self._get_active_position()
-                    real_amt = int(pos.get("size", 0)) if pos else 0
+                    real_amt = self._safe_qty(pos.get("size")) if pos else 0
                     actual_side = "LONG" if pos and pos.get('posSide') == "long" else "SHORT"
 
                     if real_amt == 0:
@@ -875,7 +885,7 @@ class PositionSupervisor:
                         )
                         self._save_state()
                         verified = self._verify_position(self.current_side)
-                        if verified and int(verified['size']) == real_amt:
+                        if verified and self._safe_qty(verified['size']) == real_amt:
                             verify_note = (
                                 f"核实 {real_amt}张 @ {verified['entry_price']:.2f} | "
                                 f"止盈 {result['matched']}/{result['expected']} 档 | "
@@ -1026,12 +1036,12 @@ class PositionSupervisor:
 
         for round_i in range(6):
             pos = self._get_active_position()
-            if not pos or int(pos.get("size", 0)) == 0:
+            if not pos or self._safe_qty(pos.get("size")) == 0:
                 closed_successfully = True
                 break
 
             close_side = "sell" if pos["posSide"] == "long" else "buy"
-            live_sz = int(pos["size"])
+            live_sz = self._safe_qty(pos["size"])
             logger.info(f"🔪 强平第 {round_i + 1}/6 轮: {close_side} {live_sz}张 reduceOnly")
             deepcoin_client.place_market_order(
                 self.symbol, close_side, pos["posSide"], live_sz, reduce_only=True,
@@ -1040,7 +1050,7 @@ class PositionSupervisor:
 
         if not closed_successfully:
             residual = self._get_active_position()
-            residual_sz = int(residual["size"]) if residual else 0
+            residual_sz = self._safe_qty(residual["size"]) if residual else 0
             logger.error(f"❌ 6 轮强平后仍有残单: {residual_sz}张")
             dingtalk.report_system_alert(
                 "强平未完全归零",
@@ -1085,9 +1095,9 @@ class PositionSupervisor:
                     self.last_tv_signal = s.get("last_tv_signal")
 
             pos = self._get_active_position()
-            if pos and int(pos.get("size", 0)) != 0:
+            if pos and self._safe_qty(pos.get("size", 0)) != 0:
                 reconcile_notes = self._reconcile_context_on_recover(pos)
-                real_amt = int(pos["size"])
+                real_amt = self._safe_qty(pos["size"])
                 self.current_side = "LONG" if pos.get("posSide") == "long" else "SHORT"
                 self.watched_qty = self.initial_qty = real_amt
                 self.watched_entry = float(pos["entry_price"])
@@ -1130,7 +1140,7 @@ class PositionSupervisor:
                 threading.Thread(target=self._sentinel_loop, daemon=True).start()
 
                 verified = self._verify_position(self.current_side)
-                if verified and int(verified['size']) == real_amt:
+                if verified and self._safe_qty(verified['size']) == real_amt:
                     tv_note = ""
                     if self.last_tv_signal:
                         tv_note = (
