@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 WS_PUBLIC_SWAP = "wss://stream.deepcoin.com/streamlet/trade/public/swap?platform=api&version=v2"
 WS_PRIVATE = "wss://stream.deepcoin.com/v1/private"
 
-CLIENT_VERSION = "v13.4.1-qtyfix"
+CLIENT_VERSION = "v13.4.3-ws-radar"
 # 公开 instruments 接口失败时的硬编码兜底
 SYMBOL_TICK_FALLBACK = {
     "ETH-USDT-SWAP": "0.01",
@@ -36,7 +36,12 @@ class DeepcoinClient:
         self.passphrase = os.getenv("DEEPCOIN_PASSPHRASE", "")
         self.base_url = "https://api.deepcoin.com"
         self._price_cache = {}
-        self._price_cache_ts = 0.0
+        self._price_cache_ts = {}
+        self._price_lock = threading.Lock()
+        self._pub_price_ws_running = False
+        self._pub_price_ws_symbol = None
+        self._rest_price_min_interval = 30
+        self._last_rest_price_fetch = 0.0
         self._listen_key = None
         self._listen_key_expire = 0
         self._ws_thread = None
@@ -150,21 +155,146 @@ class DeepcoinClient:
                     return eq if eq > 0 else float(item.get("availBal", 0))
         return 0.0
 
-    def get_current_price(self, symbol="ETH-USDT-SWAP"):
-        """GET /deepcoin/market/tickers — 官方公开行情接口"""
+    def inst_id_to_ws_symbol(self, symbol="ETH-USDT-SWAP"):
+        """ETH-USDT-SWAP → ETHUSDT（深币 WS v2 合约格式）"""
+        return symbol.replace("-SWAP", "").replace("-", "")
+
+    @staticmethod
+    def _extract_last_price(payload):
+        if isinstance(payload, dict):
+            for key in ("last", "LastPrice", "lastPx", "LastPx", "close", "price", "p", "Last"):
+                val = payload.get(key)
+                if val is not None and str(val).strip() not in ("", "0"):
+                    try:
+                        px = float(val)
+                        if px > 0:
+                            return px
+                    except (TypeError, ValueError):
+                        pass
+            for val in payload.values():
+                px = DeepcoinClient._extract_last_price(val)
+                if px:
+                    return px
+        elif isinstance(payload, list):
+            for item in payload:
+                px = DeepcoinClient._extract_last_price(item)
+                if px:
+                    return px
+        return None
+
+    def _set_ws_price(self, symbol, price):
+        with self._price_lock:
+            self._price_cache[symbol] = price
+            self._price_cache_ts[symbol] = time.time()
+
+    def _get_ws_price(self, symbol, max_age=30.0):
+        with self._price_lock:
+            px = self._price_cache.get(symbol)
+            ts = self._price_cache_ts.get(symbol, 0.0)
+        if px and (time.time() - ts) <= max_age:
+            return px
+        return None
+
+    def start_public_price_ws(self, symbol="ETH-USDT-SWAP"):
+        """订阅 market-latest — 雷达用 WS 推价，避免 REST 轮询限频"""
+        if self._pub_price_ws_running and self._pub_price_ws_symbol == symbol:
+            return
+        self._pub_price_ws_symbol = symbol
+        if not self._pub_price_ws_running:
+            self._pub_price_ws_running = True
+            threading.Thread(
+                target=self._public_price_ws_loop, args=(symbol,), daemon=True,
+            ).start()
+            logger.info(f"📡 深币公开 WS 启动: {self.inst_id_to_ws_symbol(symbol)} market-latest")
+
+    def _public_price_ws_loop(self, symbol):
+        try:
+            import websocket
+        except ImportError:
+            logger.warning("未安装 websocket-client，雷达将回退 REST 慢速兜底")
+            self._pub_price_ws_running = False
+            return
+
+        ws_symbol = self.inst_id_to_ws_symbol(symbol)
+
+        def on_message(ws, message):
+            if message == "pong":
+                return
+            try:
+                data = json.loads(message)
+                px = self._extract_last_price(data)
+                if px:
+                    self._set_ws_price(symbol, px)
+            except Exception as e:
+                logger.debug(f"WS 行情解析: {e}")
+
+        def on_error(ws, error):
+            logger.warning(f"深币公开 WS 错误: {error}")
+
+        def on_close(ws, code, msg):
+            logger.warning(f"深币公开 WS 断开: {code} {msg}")
+
+        def on_open(ws):
+            sub = {
+                "SendTopicAction": {
+                    "Action": "1",
+                    "Symbol": ws_symbol,
+                    "Topic": "market-latest",
+                    "LocalNo": 101,
+                    "ResumeNo": -1,
+                }
+            }
+            ws.send(json.dumps(sub))
+            logger.info(f"深币公开 WS 已订阅 {ws_symbol} market-latest")
+
+            def ping_loop():
+                while self._pub_price_ws_running:
+                    try:
+                        ws.send("ping")
+                    except Exception:
+                        break
+                    time.sleep(15)
+
+            threading.Thread(target=ping_loop, daemon=True).start()
+
+        while self._pub_price_ws_running:
+            try:
+                ws = websocket.WebSocketApp(
+                    WS_PUBLIC_SWAP, on_open=on_open, on_message=on_message,
+                    on_error=on_error, on_close=on_close,
+                )
+                ws.run_forever(ping_interval=0)
+            except Exception as e:
+                logger.error(f"深币公开 WS 异常: {e}")
+            if self._pub_price_ws_running:
+                time.sleep(3)
+
+    def get_current_price(self, symbol="ETH-USDT-SWAP", prefer_ws=True):
+        """优先 WS 缓存；REST tickers 仅兜底且限频"""
+        if prefer_ws:
+            ws_px = self._get_ws_price(symbol)
+            if ws_px:
+                return ws_px
         now = time.time()
-        if symbol in self._price_cache and now - self._price_cache_ts < 2:
-            return self._price_cache[symbol]
+        min_gap = self._rest_price_min_interval if self._pub_price_ws_running else 2
+        cached = self._get_ws_price(symbol, max_age=min_gap)
+        if cached:
+            return cached
+        if now - self._last_rest_price_fetch < min_gap:
+            stale = self._get_ws_price(symbol, max_age=120)
+            return stale or 0.0
+        self._last_rest_price_fetch = now
         res = self._public_request("/market/tickers", {"instType": "SWAP"})
         if res and str(res.get("code")) == "0":
             for item in res.get("data", []):
                 last = float(item.get("last", 0) or 0)
+                inst = item.get("instId", "")
                 if last > 0:
-                    self._price_cache[item.get("instId", "")] = last
-            self._price_cache_ts = now
+                    self._set_ws_price(inst, last)
             if symbol in self._price_cache:
                 return self._price_cache[symbol]
-        return 0.0
+        stale = self._get_ws_price(symbol, max_age=120)
+        return stale or 0.0
 
     def get_instrument_info(self, symbol="ETH-USDT-SWAP"):
         if symbol in self._instrument_cache:
