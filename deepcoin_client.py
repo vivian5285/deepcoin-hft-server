@@ -10,6 +10,7 @@ import requests
 import time
 import threading
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from urllib.parse import urlencode
 from dotenv import load_dotenv
 
@@ -165,21 +166,55 @@ class DeepcoinClient:
         if res and str(res.get("code")) == "0" and res.get("data"):
             info = res["data"][0]
             self._instrument_cache[symbol] = info
+            logger.info(
+                f"[合约规格] {symbol} tickSz={info.get('tickSz')} lotSz={info.get('lotSz')} "
+                f"minSz={info.get('minSz')}"
+            )
             return info
+        logger.warning(f"[合约规格] 无法获取 {symbol} instruments，使用默认 tickSz=0.01")
         return {}
 
+    @staticmethod
+    def _tick_decimal_places(tick_str: str) -> int:
+        """tickSz='0.01' → 2 位小数（保留 tick 定义中的尾零）"""
+        tick_str = str(tick_str).strip()
+        if not tick_str or tick_str == "0":
+            return 2
+        if "." not in tick_str:
+            return 0
+        return len(tick_str.split(".", 1)[1])
+
     def format_price(self, px, symbol="ETH-USDT-SWAP"):
+        """将价格对齐到交易所 tickSz 整数倍，避免 sCode=48 PriceNotOnTick"""
         info = self.get_instrument_info(symbol)
-        tick = info.get("tickSz", "0.01")
+        tick_str = str(info.get("tickSz", "0.01")).strip() or "0.01"
         try:
-            tick_f = float(tick)
-            if tick_f >= 1:
-                decimals = 0
-            else:
-                decimals = max(0, len(tick.rstrip('0').split('.')[-1]) if '.' in tick else 0)
-            return f"{float(px):.{decimals}f}"
-        except (TypeError, ValueError):
-            return f"{float(px):.2f}"
+            tick = Decimal(tick_str)
+        except InvalidOperation:
+            tick = Decimal("0.01")
+            tick_str = "0.01"
+        if tick <= 0:
+            tick = Decimal("0.01")
+            tick_str = "0.01"
+
+        try:
+            price = Decimal(str(px))
+        except InvalidOperation:
+            price = Decimal(str(float(px)))
+
+        units = (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        snapped = units * tick
+
+        decimals = self._tick_decimal_places(tick_str)
+        if decimals <= 0:
+            result = str(int(snapped))
+        else:
+            result = format(snapped, f".{decimals}f")
+
+        raw = str(px).strip()
+        if result != raw:
+            logger.info(f"[tick对齐] {symbol} {raw} → {result} (tickSz={tick_str})")
+        return result
 
     def get_position_info(self, symbol="ETH-USDT-SWAP"):
         return self._request("GET", "/account/positions", {"instType": "SWAP", "instId": symbol})
@@ -489,3 +524,7 @@ class DeepcoinClient:
 
 
 deepcoin_client = DeepcoinClient()
+try:
+    deepcoin_client.get_instrument_info("ETH-USDT-SWAP")
+except Exception as _e:
+    logger.warning(f"启动预加载合约规格失败: {_e}")
