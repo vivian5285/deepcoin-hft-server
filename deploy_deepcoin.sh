@@ -19,6 +19,7 @@ cd "$DIR"
 
 LOG_DIR="$DIR/logs"
 LOG_FILE="$LOG_DIR/supervisor_deepcoin.log"
+BRAIN_LOG="$LOG_DIR/deepcoin_brain.log"
 PID_FILE="$LOG_DIR/gunicorn_deepcoin.pid"
 
 RED='\033[0;31m'
@@ -222,12 +223,14 @@ health_check() {
         log_fail "POST /webhook 异常 HTTP=${HTTP_STATUS}"
     fi
 
-    # 6d. 大脑加载日志
+    # 6d. 大脑加载日志（大脑写入 deepcoin_brain.log，非 gunicorn error log）
     sleep 2
-    if grep -q "深币 VPS" "$LOG_FILE" 2>/dev/null || grep -q "军师托管版" "$LOG_FILE" 2>/dev/null; then
+    if grep -q "深币 VPS" "$BRAIN_LOG" 2>/dev/null || grep -q "军师托管版" "$BRAIN_LOG" 2>/dev/null; then
         log_ok "VPS 大脑模块已成功加载"
+    elif grep -q "深币 VPS" "$LOG_DIR/gunicorn_error.log" 2>/dev/null; then
+        log_ok "VPS 大脑模块已成功加载 (gunicorn_error.log)"
     else
-        log_warn "日志中暂未看到大脑加载字样（可能仍在初始化，请 tail 日志确认）"
+        log_warn "日志中暂未看到大脑加载字样（请 tail -f logs/deepcoin_brain.log 确认）"
     fi
 
     # 6e. 进程清单
@@ -243,7 +246,7 @@ print_summary() {
         echo -e "${GREEN}=== 🚀 深币(Deepcoin) 干净重部署成功 ===${NC}"
         echo -e "  网关地址: http://${BIND_HOST}:${PORT}/webhook"
         echo -e "  健康检查: http://127.0.0.1:${PORT}/health"
-        echo -e "  主日志:   tail -f ${LOG_FILE}"
+        echo -e "  大脑日志: tail -f ${BRAIN_LOG}"
         echo -e "  访问日志: tail -f ${LOG_DIR}/gunicorn_access.log"
         echo -e "  错误日志: tail -f ${LOG_DIR}/gunicorn_error.log"
     else
