@@ -143,6 +143,25 @@ install_deps() {
     command -v pip3 >/dev/null 2>&1 && PIP_CMD="pip3"
     $PIP_CMD install -q -r "$DIR/requirements.txt"
     log_ok "requirements.txt 依赖已就绪"
+
+    # 清理旧字节码，避免 gunicorn 加载过期 .pyc
+    find "$DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    find "$DIR" -name "*.pyc" -delete 2>/dev/null || true
+
+    if grep -q "CLIENT_VERSION.*v13.4-nuclear-guard" "$DIR/deepcoin_client.py" 2>/dev/null; then
+        log_ok "deepcoin_client.py 版本 v13.4-nuclear-guard"
+    else
+        log_fail "deepcoin_client.py 不是最新版！缺少 v13.4-nuclear-guard，请先 push/pull 最新代码"
+        return 1
+    fi
+
+    if grep -q "DEEPCOIN_SUPERVISOR_VERSION.*v13.4-nuclear-guard" "$DIR/position_supervisor_deepcoin.py" 2>/dev/null; then
+        log_ok "position_supervisor_deepcoin.py 版本 v13.4-nuclear-guard"
+    else
+        log_fail "position_supervisor_deepcoin.py 不是最新版！缺少 v13.4-nuclear-guard"
+        return 1
+    fi
+
     python3 -m py_compile "$DIR/app.py" "$DIR/deepcoin_client.py" \
         "$DIR/dingtalk.py" "$DIR/position_supervisor_deepcoin.py" 2>/dev/null \
         && log_ok "核心 Python 文件语法检查通过" \
@@ -225,8 +244,10 @@ health_check() {
 
     # 6d. 大脑加载日志（大脑写入 deepcoin_brain.log，非 gunicorn error log）
     sleep 2
-    if grep -q "深币 VPS" "$BRAIN_LOG" 2>/dev/null || grep -q "军师托管版" "$BRAIN_LOG" 2>/dev/null; then
-        log_ok "VPS 大脑模块已成功加载"
+    if grep -q "v13.4-nuclear-guard" "$BRAIN_LOG" 2>/dev/null; then
+        log_ok "VPS 大脑 v13.4-nuclear-guard 已成功加载"
+    elif grep -q "深币 VPS" "$BRAIN_LOG" 2>/dev/null || grep -q "军师托管版" "$BRAIN_LOG" 2>/dev/null; then
+        log_warn "大脑已加载但版本可能过旧（日志中无 v13.4-nuclear-guard，请确认代码已更新）"
     elif grep -q "深币 VPS" "$LOG_DIR/gunicorn_error.log" 2>/dev/null; then
         log_ok "VPS 大脑模块已成功加载 (gunicorn_error.log)"
     else
