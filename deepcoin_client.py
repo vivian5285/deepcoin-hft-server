@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, hmac, hashlib, base64, json, logging, requests, time
+import os
+import hmac
+import hashlib
+import base64
+import json
+import logging
+import requests
+import time
+import threading
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -8,12 +16,25 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 logger = logging.getLogger(__name__)
 
+WS_PUBLIC_SWAP = "wss://stream.deepcoin.com/streamlet/trade/public/swap?platform=api&version=v2"
+WS_PRIVATE = "wss://stream.deepcoin.com/v1/private"
+
+
 class DeepcoinClient:
     def __init__(self):
         self.api_key = os.getenv("DEEPCOIN_API_KEY", "")
         self.secret_key = os.getenv("DEEPCOIN_API_SECRET", "")
         self.passphrase = os.getenv("DEEPCOIN_PASSPHRASE", "")
         self.base_url = "https://api.deepcoin.com"
+        self._price_cache = {}
+        self._price_cache_ts = 0.0
+        self._listen_key = None
+        self._listen_key_expire = 0
+        self._ws_thread = None
+        self._ws_running = False
+        self._ws_callbacks = {}
+
+    # ── 签名与请求 ──────────────────────────────────────────────
 
     def _get_timestamp(self):
         return datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
@@ -23,79 +44,375 @@ class DeepcoinClient:
         h = hmac.new(self.secret_key.encode('utf-8'), message, hashlib.sha256)
         return base64.b64encode(h.digest()).decode('utf-8')
 
+    def _normalize_endpoint(self, endpoint: str) -> str:
+        if not endpoint.startswith("/deepcoin/"):
+            endpoint = "/deepcoin" + (endpoint if endpoint.startswith("/") else "/" + endpoint)
+        return endpoint
+
     def _request(self, method: str, endpoint: str, params: dict = None):
-        if not self.api_key or not self.secret_key: return None
-        if not endpoint.startswith("/deepcoin/"): endpoint = "/deepcoin" + (endpoint if endpoint.startswith("/") else "/" + endpoint)
+        if not self.api_key or not self.secret_key:
+            return None
+        endpoint = self._normalize_endpoint(endpoint)
         timestamp = self._get_timestamp()
         body_str = json.dumps(params, separators=(',', ':')) if params and method.upper() != "GET" else ""
-        request_path = f"{endpoint}?{'&'.join([f'{k}={v}' for k, v in params.items()])}" if method.upper() == "GET" and params else endpoint
+        request_path = (
+            f"{endpoint}?{'&'.join([f'{k}={v}' for k, v in params.items()])}"
+            if method.upper() == "GET" and params else endpoint
+        )
         signature = self._sign(timestamp, method, request_path, body_str)
-        headers = {"Content-Type": "application/json", "DC-ACCESS-KEY": self.api_key, "DC-ACCESS-SIGN": signature, "DC-ACCESS-TIMESTAMP": timestamp, "DC-ACCESS-PASSPHRASE": self.passphrase}
+        headers = {
+            "Content-Type": "application/json",
+            "DC-ACCESS-KEY": self.api_key,
+            "DC-ACCESS-SIGN": signature,
+            "DC-ACCESS-TIMESTAMP": timestamp,
+            "DC-ACCESS-PASSPHRASE": self.passphrase,
+        }
         try:
-            resp = requests.request(method.upper(), f"{self.base_url}{request_path}", data=body_str if body_str else None, headers=headers, timeout=10)
+            resp = requests.request(
+                method.upper(), f"{self.base_url}{request_path}",
+                data=body_str if body_str else None, headers=headers, timeout=10,
+            )
             return resp.json()
-        except Exception as e: 
+        except Exception as e:
             logger.error(f"Deepcoin 请求失败 {endpoint}: {e}")
             return None
 
-    def _safe_cancel(self, endpoint, params):
-        res = self._request("POST", endpoint, params)
-        if res and str(res.get("code", "")) != "0":
-            msg = str(res.get("msg", "")).lower() + str(res.get("sMsg", "")).lower()
-            if "too many" in msg or "limit" in msg or "frequent" in msg:
-                logger.warning(f"⚠️ [频率限制] 退避休眠 1.5 秒... | {msg}")
-                time.sleep(1.5)
-                res = self._request("POST", endpoint, params)
-            elif "not exist" in msg or "not found" in msg or "already" in msg or "no order" in msg:
-                pass 
-            else:
-                logger.warning(f"❌ [异常撤单] Endpoint: {endpoint} | Resp: {res}")
-        return res
+    def _public_request(self, endpoint: str, params: dict = None):
+        endpoint = self._normalize_endpoint(endpoint)
+        qs = f"?{'&'.join(f'{k}={v}' for k, v in params.items())}" if params else ""
+        try:
+            resp = requests.get(f"{self.base_url}{endpoint}{qs}", timeout=10)
+            return resp.json()
+        except Exception as e:
+            logger.error(f"Deepcoin 公开接口失败 {endpoint}: {e}")
+            return None
+
+    @staticmethod
+    def _is_success(res) -> bool:
+        if not isinstance(res, dict):
+            return False
+        if str(res.get("code", "")) != "0":
+            return False
+        data = res.get("data")
+        if isinstance(data, dict) and str(data.get("sCode", "0")) not in ("0", ""):
+            return False
+        return True
+
+    @staticmethod
+    def inst_id_to_instrument_id(inst_id: str) -> str:
+        """BTC-USDT-SWAP -> BTCUSDT"""
+        return inst_id.replace("-SWAP", "").replace("-", "")
+
+    @staticmethod
+    def swap_product_group(inst_id: str) -> str:
+        """U本位 SwapU，币本位 Swap"""
+        parts = inst_id.replace("-SWAP", "").split("-")
+        return "SwapU" if len(parts) >= 2 and parts[-1] == "USDT" else "Swap"
+
+    # ── 账户与行情 ──────────────────────────────────────────────
 
     def get_available_balance(self, ccy="USDT"):
         res = self._request("GET", "/account/balances", {"instType": "SWAP"})
         if isinstance(res, dict) and "data" in res:
             for item in res["data"]:
-                if item.get("ccy") == ccy: 
+                if item.get("ccy") == ccy:
                     eq = float(item.get("eq", 0))
-                    return eq if eq > 0 else float(item.get("availBal", 0)) 
+                    return eq if eq > 0 else float(item.get("availBal", 0))
         return 0.0
 
     def get_current_price(self, symbol="ETH-USDT-SWAP"):
-        try: return float(requests.get(f"https://api.binance.com/api/v3/ticker/price?symbol={symbol.split('-')[0]}USDT", timeout=5).json().get("price", 0.0))
-        except: return 0.0
+        """GET /deepcoin/market/tickers — 官方公开行情接口"""
+        now = time.time()
+        if symbol in self._price_cache and now - self._price_cache_ts < 2:
+            return self._price_cache[symbol]
+        res = self._public_request("/market/tickers", {"instType": "SWAP"})
+        if res and str(res.get("code")) == "0":
+            for item in res.get("data", []):
+                last = float(item.get("last", 0) or 0)
+                if last > 0:
+                    self._price_cache[item.get("instId", "")] = last
+            self._price_cache_ts = now
+            if symbol in self._price_cache:
+                return self._price_cache[symbol]
+        return 0.0
 
     def get_position_info(self, symbol="ETH-USDT-SWAP"):
         return self._request("GET", "/account/positions", {"instType": "SWAP", "instId": symbol})
 
-    def place_market_order(self, symbol, side, pos_side, qty, reduce_only=False):
-        params = {"instId": symbol, "tdMode": "cross", "side": side, "posSide": pos_side, "ordType": "market", "sz": str(int(qty)), "mrgPosition": "merge"}
-        if reduce_only: params["reduceOnly"] = True
-        return self._request("POST", "/trade/order", params)
+    def set_leverage(self, symbol="ETH-USDT-SWAP", leverage=15, mgn_mode="cross", mrg_position="merge"):
+        """POST /deepcoin/account/set-leverage"""
+        res = self._request("POST", "/account/set-leverage", {
+            "instId": symbol,
+            "lever": str(int(leverage)),
+            "mgnMode": mgn_mode,
+            "mrgPosition": mrg_position,
+        })
+        if res and self._is_success(res):
+            logger.info(f"[设置杠杆成功] {symbol} → {leverage}x")
+        elif res:
+            logger.warning(f"[设置杠杆失败] {symbol} → {leverage}x | {res}")
+        return res
 
-    def place_limit_order(self, symbol, side, pos_side, px, qty, reduce_only=False):
-        params = {"instId": symbol, "tdMode": "cross", "side": side, "posSide": pos_side, "ordType": "limit", "sz": str(int(qty)), "px": str(px), "mrgPosition": "merge"}
-        if reduce_only: params["reduceOnly"] = True
-        return self._request("POST", "/trade/order", params)
+    # ── 下单 / 撤单 ──────────────────────────────────────────────
+
+    def place_order(self, params: dict):
+        """POST /deepcoin/trade/order"""
+        res = self._request("POST", "/trade/order", params)
+        if res and not self._is_success(res):
+            data = res.get("data") or {}
+            logger.error(f"下单失败: sCode={data.get('sCode')} sMsg={data.get('sMsg')} msg={res.get('msg')}")
+        return res
+
+    def place_market_order(self, symbol, side, pos_side, qty, reduce_only=False, td_mode="cross", mrg_position="merge"):
+        params = {
+            "instId": symbol, "tdMode": td_mode, "side": side, "posSide": pos_side,
+            "ordType": "market", "sz": str(int(qty)), "mrgPosition": mrg_position,
+        }
+        if reduce_only:
+            params["reduceOnly"] = True
+        return self.place_order(params)
+
+    def place_limit_order(self, symbol, side, pos_side, px, qty, reduce_only=False, td_mode="cross", mrg_position="merge"):
+        params = {
+            "instId": symbol, "tdMode": td_mode, "side": side, "posSide": pos_side,
+            "ordType": "limit", "sz": str(int(qty)), "px": str(px), "mrgPosition": mrg_position,
+        }
+        if reduce_only:
+            params["reduceOnly"] = True
+        return self.place_order(params)
+
+    def place_trigger_order(self, symbol, side, pos_side, sz, trigger_price, order_type="market",
+                            td_mode="cross", mrg_position="merge", is_cross_margin="1",
+                            trigger_px_type="last", price=None, product_group=None):
+        """POST /deepcoin/trade/trigger-order — 条件单（含移动止损）"""
+        if product_group is None:
+            product_group = self.swap_product_group(symbol)
+            if product_group == "SwapU":
+                product_group = "Swap"
+        params = {
+            "instId": symbol, "productGroup": product_group, "sz": str(int(sz)),
+            "side": side, "posSide": pos_side, "isCrossMargin": str(is_cross_margin),
+            "orderType": order_type, "triggerPrice": str(trigger_price),
+            "mrgPosition": mrg_position, "tdMode": td_mode, "triggerPxType": trigger_px_type,
+        }
+        if order_type == "limit" and price is not None:
+            params["price"] = str(price)
+        return self._request("POST", "/trade/trigger-order", params)
+
+    def set_position_sltp(self, symbol, pos_side, sl_trigger_px=None, tp_trigger_px=None,
+                          td_mode="cross", mrg_position="merge", trigger_px_type="last"):
+        """POST /deepcoin/trade/set-position-sltp — 为已有持仓设置止盈止损"""
+        params = {
+            "instType": "SWAP", "instId": symbol, "posSide": pos_side,
+            "mrgPosition": mrg_position, "tdMode": td_mode,
+            "tpTriggerPxType": trigger_px_type, "slTriggerPxType": trigger_px_type,
+            "tpOrdPx": "-1", "slOrdPx": "-1",
+        }
+        if tp_trigger_px is not None:
+            params["tpTriggerPx"] = str(tp_trigger_px)
+        if sl_trigger_px is not None:
+            params["slTriggerPx"] = str(sl_trigger_px)
+        return self._request("POST", "/trade/set-position-sltp", params)
+
+    def cancel_order(self, symbol, ord_id=None, cl_ord_id=None):
+        """POST /deepcoin/trade/cancel-order"""
+        params = {"instId": symbol}
+        if ord_id:
+            params["ordId"] = ord_id
+        elif cl_ord_id:
+            params["clOrdId"] = cl_ord_id
+        else:
+            return None
+        return self._safe_cancel("/trade/cancel-order", params)
+
+    def get_order(self, symbol, ord_id=None, cl_ord_id=None):
+        """GET /deepcoin/trade/order — 查询单笔订单"""
+        params = {"instId": symbol}
+        if ord_id:
+            params["ordId"] = ord_id
+        elif cl_ord_id:
+            params["clOrdId"] = cl_ord_id
+        else:
+            return None
+        return self._request("GET", "/trade/order", params)
+
+    def batch_close_position(self, symbol):
+        """POST /deepcoin/trade/batch-close-position — 批量平仓指定产品所有仓位"""
+        return self._request("POST", "/trade/batch-close-position", {
+            "productGroup": self.swap_product_group(symbol),
+            "instId": symbol,
+        })
+
+    def get_pending_orders(self, symbol="ETH-USDT-SWAP"):
+        """GET /deepcoin/trade/v2/orders-pending — 未成交限价单"""
+        res = self._request("GET", "/trade/v2/orders-pending", {
+            "instId": symbol, "index": 1, "limit": 100,
+        })
+        if res and isinstance(res.get("data"), list):
+            return res["data"]
+        return []
+
+    def get_trigger_orders_pending(self, symbol="ETH-USDT-SWAP"):
+        """GET /deepcoin/trade/trigger-orders-pending — 未触发条件单"""
+        res = self._request("GET", "/trade/trigger-orders-pending", {
+            "instType": "SWAP", "instId": symbol, "limit": 100,
+        })
+        if res and isinstance(res.get("data"), list):
+            return res["data"]
+        return []
+
+    def _safe_cancel(self, endpoint, params):
+        res = self._request("POST", endpoint, params)
+        if res and str(res.get("code", "")) != "0":
+            msg = str(res.get("msg", "")).lower() + str(res.get("sMsg", "")).lower()
+            data = res.get("data") or {}
+            if isinstance(data, dict):
+                msg += str(data.get("sMsg", "")).lower()
+            if "too many" in msg or "limit" in msg or "frequent" in msg:
+                logger.warning(f"⚠️ [频率限制] 退避休眠 1.5 秒... | {msg}")
+                time.sleep(1.5)
+                res = self._request("POST", endpoint, params)
+            elif "not exist" in msg or "not found" in msg or "already" in msg or "no order" in msg:
+                pass
+            else:
+                logger.warning(f"❌ [异常撤单] Endpoint: {endpoint} | Resp: {res}")
+        return res
 
     def cancel_all_open_orders(self, symbol="ETH-USDT-SWAP"):
+        """一键撤单 + 条件单一键撤单 + 兜底逐笔撤销"""
         try:
-            base_symbol = symbol.replace("-SWAP", "").replace("-", "")
+            instrument_id = self.inst_id_to_instrument_id(symbol)
+            product_group = self.swap_product_group(symbol)
             self._safe_cancel("/trade/swap/cancel-all", {
-                "InstrumentID": base_symbol, "ProductGroup": "SwapU", "IsCrossMargin": 1, "IsMergeMode": 1
+                "InstrumentID": instrument_id,
+                "ProductGroup": product_group,
+                "IsCrossMargin": 1,
+                "IsMergeMode": 1,
             })
             self._safe_cancel("/trade/swap/cancel-trigger-all", {
-                "InstrumentID": base_symbol, "ProductGroup": "SwapU", "IsCrossMargin": -1, "IsMergeMode": -1
+                "ProductGroup": product_group,
+                "InstrumentID": instrument_id,
+                "IsCrossMargin": -1,
+                "IsMergeMode": -1,
             })
             time.sleep(0.4)
-            pending = self._request("GET", "/trade/v2/orders-pending", {"instId": symbol, "limit": 50})
-            if pending and 'data' in pending and isinstance(pending['data'], list):
-                for ord in pending['data']:
-                    if ord.get("ordId"): self._safe_cancel("/trade/cancel-order", {"instId": symbol, "ordId": ord.get("ordId")})
-            trigger_pending = self._request("GET", "/trade/trigger-orders-pending", {"instType": "SWAP", "instId": symbol, "limit": 50})
-            if trigger_pending and 'data' in trigger_pending and isinstance(trigger_pending['data'], list):
-                for t_ord in trigger_pending['data']:
-                    if t_ord.get("ordId"): self._safe_cancel("/trade/cancel-trigger-order", {"instId": symbol, "ordId": t_ord.get("ordId")})
-        except Exception as e: logger.error(f"撤单巡检异常: {e}")
+
+            pending = self._request("GET", "/trade/v2/orders-pending", {
+                "instId": symbol, "index": 1, "limit": 100,
+            })
+            if pending and isinstance(pending.get("data"), list):
+                for ord_item in pending["data"]:
+                    if ord_item.get("ordId"):
+                        self._safe_cancel("/trade/cancel-order", {
+                            "instId": symbol, "ordId": ord_item["ordId"],
+                        })
+
+            trigger_pending = self._request("GET", "/trade/trigger-orders-pending", {
+                "instType": "SWAP", "instId": symbol, "limit": 100,
+            })
+            if trigger_pending and isinstance(trigger_pending.get("data"), list):
+                for t_ord in trigger_pending["data"]:
+                    if t_ord.get("ordId"):
+                        self._safe_cancel("/trade/cancel-trigger-order", {
+                            "instId": symbol, "ordId": t_ord["ordId"],
+                        })
+        except Exception as e:
+            logger.error(f"撤单巡检异常: {e}")
+
+    # ── ListenKey 与私有 WebSocket ────────────────────────────────
+
+    def acquire_listen_key(self):
+        """GET /deepcoin/listenkey/acquire"""
+        res = self._request("GET", "/listenkey/acquire")
+        if self._is_success(res) and isinstance(res.get("data"), dict):
+            self._listen_key = res["data"].get("listenkey")
+            self._listen_key_expire = int(res["data"].get("expire_time", 0))
+        return res
+
+    def extend_listen_key(self, listenkey=None):
+        """GET /deepcoin/listenkey/extend — 滑动续期 1 小时"""
+        key = listenkey or self._listen_key
+        if not key:
+            return None
+        res = self._request("GET", "/listenkey/extend", {"listenkey": key})
+        if self._is_success(res) and isinstance(res.get("data"), dict):
+            self._listen_key = res["data"].get("listenkey", key)
+            self._listen_key_expire = int(res["data"].get("expire_time", 0))
+        return res
+
+    def start_private_ws(self, tables=None, on_message=None):
+        """订阅私有 WebSocket：Order / Position / Trade 等频道"""
+        if self._ws_running:
+            return
+        if not self._listen_key:
+            self.acquire_listen_key()
+        if not self._listen_key:
+            logger.error("无法获取 listenKey，私有 WebSocket 启动失败")
+            return
+
+        tables = tables or ["Order", "Position", "Trade", "TriggerOrder"]
+        if on_message:
+            self._ws_callbacks["default"] = on_message
+
+        self._ws_running = True
+        self._ws_thread = threading.Thread(
+            target=self._private_ws_loop, args=(tables,), daemon=True,
+        )
+        self._ws_thread.start()
+        logger.info(f"私有 WebSocket 已启动，订阅频道: {tables}")
+
+    def stop_private_ws(self):
+        self._ws_running = False
+
+    def _private_ws_loop(self, tables):
+        try:
+            import websocket
+        except ImportError:
+            logger.warning("未安装 websocket-client，跳过私有 WebSocket（pip install websocket-client）")
+            self._ws_running = False
+            return
+
+        url = f"{WS_PRIVATE}?listenKey={self._listen_key}"
+        last_extend = time.time()
+
+        def on_message(ws, message):
+            if message == "pong":
+                return
+            try:
+                data = json.loads(message)
+                cb = self._ws_callbacks.get("default")
+                if cb:
+                    cb(data)
+            except Exception as e:
+                logger.debug(f"WS 消息解析: {e}")
+
+        def on_error(ws, error):
+            logger.error(f"私有 WebSocket 错误: {error}")
+
+        def on_close(ws, close_status_code, close_msg):
+            logger.warning(f"私有 WebSocket 断开: {close_status_code} {close_msg}")
+            self._ws_running = False
+
+        def on_open(ws):
+            sub = {"action": "subscribe", "tables": tables}
+            ws.send(json.dumps(sub))
+            logger.info("私有 WebSocket 订阅消息已发送")
+
+        while self._ws_running:
+            try:
+                if time.time() - last_extend > 1800:
+                    self.extend_listen_key()
+                    last_extend = time.time()
+
+                ws = websocket.WebSocketApp(
+                    url, on_open=on_open, on_message=on_message,
+                    on_error=on_error, on_close=on_close,
+                )
+                ws.run_forever(ping_interval=15, ping_payload="ping")
+            except Exception as e:
+                logger.error(f"私有 WebSocket 重连异常: {e}")
+            if self._ws_running:
+                time.sleep(3)
+
 
 deepcoin_client = DeepcoinClient()
