@@ -205,11 +205,11 @@ class PositionSupervisor:
 
                     if has_moved_favorably:
                         trail_offset = self.current_atr * trail_atr_multiplier
-                        # 千分之1.5的手续费/滑点缓冲，保证绝对保本
                         fee_buffer = self.watched_entry * 0.0015 
 
                         if self.current_side == "LONG":
-                            breakeven_floor = self.watched_entry + fee_buffer
+                            # 🚀 保险升级：保本底线强制 2 位小数
+                            breakeven_floor = round(self.watched_entry + fee_buffer, 2)
                             new_sl = max(round(self.best_price - trail_offset, 2), breakeven_floor) 
                             
                             if new_sl > self.current_sl + 1.0:
@@ -220,7 +220,8 @@ class PositionSupervisor:
                                 self._rebuild_defenses(actual_qty, self.watched_entry, dynamic_sl=new_sl)
                                 dingtalk.report_intervention(actual_qty, self.watched_entry, new_sl, f"🚀 档位{self.regime} 雷达激活：保本盾升起，锁润底线物理推升！")
                         else:
-                            breakeven_floor = self.watched_entry - fee_buffer
+                            # 🚀 保险升级：保本底线强制 2 位小数
+                            breakeven_floor = round(self.watched_entry - fee_buffer, 2)
                             new_sl = min(round(self.best_price + trail_offset, 2), breakeven_floor)
                             
                             if self.current_sl >= self.watched_entry or new_sl < self.current_sl - 1.0:
